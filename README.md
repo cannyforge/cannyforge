@@ -422,7 +422,9 @@ GitHub Actions runs on every push and PR to `main`:
 
 ## License
 
-See LICENSE file for details.
+Licensed under [BSL 1.1](LICENSE). Free to use in production, but you may not offer CannyForge as a competing hosted service. Converts to Apache 2.0 on 2030-03-01. See LICENSE for full terms.
+
+For commercial licensing inquiries: cannyforge@gmail.com
 
 ---
 

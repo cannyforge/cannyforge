@@ -49,7 +49,7 @@ from cannyforge.learning import (
 )
 from cannyforge.tools import ToolDefinition, ToolExecutor, ToolRegistry
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Core
