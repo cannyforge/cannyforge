@@ -1,0 +1,61 @@
+[project]
+name = "cannyforge"
+version = "0.1.0"
+description = "Self-improving agents with closed-loop learning — agents that learn to get it right"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "pydantic>=2.5.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+claude = ["anthropic>=0.39.0"]
+openai = ["openai>=1.0.0"]
+deepseek = ["openai>=1.0.0"]
+mcp = ["mcp[cli]>=1.0.0"]
+dashboard = ["streamlit>=1.30.0"]
+all = [
+    "anthropic>=0.39.0",
+    "openai>=1.0.0",
+    "mcp[cli]>=1.0.0",
+    "streamlit>=1.30.0",
+]
+
+[project.scripts]
+cannyforge = "cannyforge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/cannyforge/cannyforge"
+Documentation = "https://github.com/cannyforge/cannyforge#readme"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cannyforge*"]
+
+[tool.setuptools.package-data]
+cannyforge = [
+    "bundled_skills/**/*.md",
+    "bundled_skills/**/*.yaml",
+    "bundled_skills/**/*.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
