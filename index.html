@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CannyForge — Self-Improving Agents</title>
+    <meta name="description" content="Agents that learn from experience through closed-loop feedback. Declarative skills, automatic rule learning, and rule lifecycle management.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: #1a1a2e;
+            background: #fafafa;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        header {
+            padding: 60px 0 40px;
+            text-align: center;
+        }
+        .logo {
+            font-size: 48px;
+            font-weight: 700;
+            color: #1a1a2e;
+            margin-bottom: 8px;
+        }
+        .logo span {
+            color: #6366f1;
+        }
+        .tagline {
+            font-size: 20px;
+            color: #64748b;
+            margin-bottom: 32px;
+        }
+        .hero {
+            background: linear-gradient(135deg, #1a1a2e 0%, #6366f1 100%);
+            color: white;
+            padding: 60px 0;
+            border-radius: 16px;
+            margin-bottom: 48px;
+            text-align: center;
+        }
+        .hero h1 {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+        .hero p {
+            font-size: 18px;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto 32px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 14px 32px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            text-decoration: none;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn-primary {
+            background: #6366f1;
+            color: white;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+        }
+        .btn-secondary {
+            background: white;
+            color: #1a1a2e;
+            margin-left: 12px;
+        }
+        .btn-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 24px;
+            margin-bottom: 48px;
+        }
+        .feature {
+            background: white;
+            padding: 28px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .feature h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: #1a1a2e;
+        }
+        .feature p {
+            color: #64748b;
+            font-size: 14px;
+        }
+        .code-block {
+            background: #1a1a2e;
+            color: #e2e8f0;
+            padding: 24px;
+            border-radius: 12px;
+            margin-bottom: 48px;
+            overflow-x: auto;
+        }
+        .code-block code {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        .code-block .comment {
+            color: #64748b;
+        }
+        .code-block .keyword {
+            color: #c084fc;
+        }
+        .code-block .string {
+            color: #86efac;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 48px;
+            margin-bottom: 48px;
+            padding: 32px 0;
+            border-top: 1px solid #e2e8f0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .stat {
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #6366f1;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #64748b;
+        }
+        footer {
+            text-align: center;
+            padding: 40px 0;
+            color: #64748b;
+            font-size: 14px;
+        }
+        footer a {
+            color: #6366f1;
+            text-decoration: none;
+        }
+        .license {
+            background: white;
+            padding: 20px 28px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 48px;
+            font-size: 14px;
+            color: #64748b;
+        }
+        .license strong {
+            color: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">Canny<span>Forge</span></div>
+            <p class="tagline">Self-Improving Agents Through Closed-Loop Learning</p>
+            <a href="https://github.com/cannyforge/cannyforge" class="btn btn-primary">GitHub</a>
+            <a href="https://pypi.org/project/cannyforge/" class="btn btn-secondary">pip install cannyforge</a>
+        </header>
+
+        <div class="hero">
+            <h1>Agents That Actually Learn</h1>
+            <p>Skills are defined declaratively via SKILL.md files. The engine handles execution, error detection, pattern learning, rule application, and lifecycle automatically.</p>
+            <a href="#quickstart" class="btn btn-secondary">Try It Now</a>
+        </div>
+
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-value">254</div>
+                <div class="stat-label">Tests</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">11</div>
+                <div class="stat-label">CLI Commands</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">4</div>
+                <div class="stat-label">Built-in Skills</div>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>Declarative Skills</h3>
+                <p>Define skills via SKILL.md files following the AgentSkills.io spec. No Python subclassing required.</p>
+            </div>
+            <div class="feature">
+                <h3>Automatic Learning</h3>
+                <p>Monitors errors, detects patterns, generates rules. Triggers automatically when 2+ uncovered error types appear.</p>
+            </div>
+            <div class="feature">
+                <h3>Rule Lifecycle</h3>
+                <p>Rules that underperform are demoted to PROBATION, then DORMANT — never deleted. Resurrection when errors resurface.</p>
+            </div>
+            <div class="feature">
+                <h3>Framework Integrations</h3>
+                <p>Works with LangChain and CrewAI. Wrap any skill as a tool for your existing agent.</p>
+            </div>
+            <div class="feature">
+                <h3>LLM-Powered</h3>
+                <p>Three-tier execution: custom handler → LLM multi-step loop → template fallback. Your choice.</p>
+            </div>
+            <div class="feature">
+                <h3>Storage Options</h3>
+                <p>JSON file or SQLite backend. Your data stays on your machine.</p>
+            </div>
+        </div>
+
+        <div id="quickstart">
+            <h2 style="margin-bottom: 20px; font-size: 28px;">Quick Start</h2>
+            <div class="code-block">
+                <code>
+<span class="comment"># Install</span>
+pip install cannyforge
+
+<span class="comment"># Run the demo</span>
+cannyforge demo
+
+<span class="comment"># Or use in code</span>
+<span class="keyword">from</span> cannyforge <span class="keyword">import</span> CannyForge
+
+forge = CannyForge()
+result = forge.execute(<span class="string">"Write an email about the 3 PM meeting"</span>)
+
+<span class="comment"># First run: False (TimezoneError logged)</span>
+<span class="comment"># After learning: True (rule prevents the error)</span>
+<span class="keyword">print</span>(result.success, result.output)
+                </code>
+            </div>
+        </div>
+
+        <div class="license">
+            <strong>License:</strong> BSL 1.1 — Free to use in production, but you may not offer CannyForge as a competing hosted service. Converts to Apache 2.0 on 2030-03-01.
+        </div>
+
+        <footer>
+            <p><a href="https://github.com/cannyforge/cannyforge">GitHub</a> · <a href="https://pypi.org/project/cannyforge/">PyPI</a> · <a href="mailto:cannyforge@gmail.com">Contact</a></p>
+            <p style="margin-top: 12px;">&copy; 2026 CannyForge. Built with Claude Code.</p>
+        </footer>
+    </div>
+</body>
+</html>
