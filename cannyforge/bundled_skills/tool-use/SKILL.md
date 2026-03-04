@@ -1,9 +1,9 @@
 ---
 name: tool-use
 description: >-
-  Improves tool use accuracy by learning from incorrect tool selections,
-  missing parameters, type mismatches, and ambiguous requests.
-  Applies prevention rules to bias agents toward correct tool calls.
+  Skill for improving tool use accuracy. Monitors tool selection decisions,
+  detects errors (wrong tool, missing params, type mismatches, ambiguity),
+  and applies learned prevention rules to improve future accuracy.
 license: BSL-1.1
 compatibility: Python 3.10+
 metadata:
@@ -12,53 +12,95 @@ metadata:
   category: tool-use
   output_type: tool_call
   triggers:
-    - tool
-    - tool use
-    - function call
-    - tool selection
+    # Math operations
     - calculate
-    - search
-    - run command
+    - compute
+    - sum
+    - add
+    - multiply
+    - divide
+    - percentage
+    - tip
+    - math
+    - expression
+    # File operations
     - read file
     - write file
+    - save file
+    - open file
+    # Command operations
+    - run command
+    - execute
+    - terminal
+    - shell
+    # Search
+    - search web
+    - look up
+    # Communication
     - send message
-  tools:
-    - search_web
-    - read_file
-    - write_file
-    - run_command
-    - calculate
-    - send_message
+    - notify
+    - tell
+    # Generic question starters (low priority, let others match first)
+    - what is
+    - what was
+    - how much
+    - how many
+    - how long
+  tools: []
   context_fields:
     selected_tool: { type: str, default: "" }
     tool_match_confidence: { type: float, default: 1.0 }
     has_required_params: { type: bool, default: true }
     has_type_mismatch: { type: bool, default: false }
     has_extra_params: { type: bool, default: false }
-    output_schema_valid: { type: bool, default: true }
     requires_prior_context: { type: bool, default: false }
     has_prior_context: { type: bool, default: false }
 ---
 
 # Tool Use Accuracy
 
-## Capabilities
-- Learns correct tool selection from natural language intent
-- Detects missing required parameters and injects defaults
-- Flags type mismatches for automatic coercion
-- Identifies ambiguous requests needing clarification
-- Enforces output schema validation
-- Carries forward context for multi-step tool chains
+This skill enables closed-loop learning for tool use accuracy. It monitors
+agent tool selection decisions and learns from mistakes.
+
+## How It Works
+
+1. Agent makes a tool call based on user request
+2. If tool fails (wrong tool, missing params, etc.), error is recorded
+3. Learning engine detects patterns and generates prevention rules
+4. Next time, middleware applies rules as warnings/context
+5. Agent sees warnings and makes better decisions
+
+## Learning Flow
+
+```
+User Request → Agent picks tool → Execution → Success/Failure
+                     ↓                              ↓
+              Prevention Rules ← Learning Engine ← Error Record
+                     ↓
+         (warnings added to context)
+                     ↓
+       Agent sees warnings → picks better tool
+```
+
+## Error Types Learned
+
+- **WrongToolError**: Agent picks wrong tool for the task
+- **MissingParamError**: Required parameter omitted
+- **WrongParamTypeError**: Parameter has wrong type
+- **ExtraParamError**: Unnecessary params confuse execution
+- **AmbiguityError**: Request unclear, could mean multiple things
+- **ContextMissError**: Needed context from prior steps
 
 ## Usage
-Provide a natural language task description. The skill matches intent
-to the correct tool, validates parameters, and applies learned prevention
-rules to improve accuracy over time.
 
-## Examples
-- "What's 15% tip on $47.80?" -> calculate
-- "Find the latest React docs" -> search_web
-- "Show me the config file" -> read_file
-- "Tell Alice the build passed" -> send_message
-- "List running processes" -> run_command
-- "Save these notes to notes.txt" -> write_file
+This skill works with CannyForge adapters (LangGraph, MCP) that wrap agents.
+The skill itself is declarative — it defines what errors to track and what
+context fields to use. The actual tool selection is done by the agent.
+
+Example integration (LangGraph):
+```python
+from cannyforge.adapters.langgraph import CannyForgeMiddleware
+
+middleware = CannyForgeMiddleware(forge, skill_name="tool_use")
+agent = create_agent(middleware=[middleware], tools=[...])
+```
