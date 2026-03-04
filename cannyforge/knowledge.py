@@ -688,6 +688,102 @@ class RuleGenerator:
             ],
             'description': 'Warn about low credibility sources'
         },
+        # ── Tool Use Accuracy patterns ──────────────────────────────
+        'WrongToolError': {
+            'detection': [
+                Condition('context.selected_tool', ConditionOperator.NOT_CONTAINS, ''),
+                Condition('context.tool_match_confidence', ConditionOperator.LESS_THAN, 0.6),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'wrong_tool_risk'),
+                Action('append', 'context.warnings', 'Low tool-match confidence; verify tool selection against task intent'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Wrong tool was selected; re-routing to correct tool based on intent keywords'),
+            ],
+            'description': 'Flag when agent selects a tool that does not match task intent'
+        },
+        'MissingParamError': {
+            'detection': [
+                Condition('context.has_required_params', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'missing_param'),
+                Action('append', 'context.warnings', 'Required parameter missing; inject default or prompt for value'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Tool call failed due to missing parameter; adding default value'),
+            ],
+            'description': 'Detect when a required tool parameter is omitted'
+        },
+        'WrongParamTypeError': {
+            'detection': [
+                Condition('context.has_type_mismatch', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'param_type_mismatch'),
+                Action('append', 'context.warnings', 'Parameter type mismatch detected; coerce to expected type'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Tool call failed due to wrong parameter type; applying type coercion'),
+            ],
+            'description': 'Flag when a tool parameter has the wrong type (e.g. string instead of int)'
+        },
+        'ExtraParamError': {
+            'detection': [
+                Condition('context.has_extra_params', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'extra_params'),
+                Action('append', 'context.warnings', 'Extraneous parameters detected; stripping unknown params'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Tool call included extra parameters that caused confusion; removing them'),
+            ],
+            'description': 'Strip unnecessary parameters that confuse tool execution'
+        },
+        'AmbiguityError': {
+            'detection': [
+                Condition('task.description', ConditionOperator.MATCHES,
+                         r'\b(find|look up|check|get)\b'),
+                Condition('context.tool_match_confidence', ConditionOperator.LESS_THAN, 0.5),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'ambiguous_request'),
+                Action('append', 'context.suggestions', 'Request is ambiguous; consider clarifying intent before tool selection'),
+            ],
+            'recovery': [
+                Action('append', 'context.suggestions', 'Ambiguous request led to wrong tool; adding clarification step'),
+            ],
+            'description': 'Flag ambiguous requests that could map to multiple tools'
+        },
+        'FormatError': {
+            'detection': [
+                Condition('context.output_schema_valid', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'format_mismatch'),
+                Action('append', 'context.warnings', 'Output does not match expected schema; enforce validation'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Tool output format mismatch; re-formatting to match expected schema'),
+            ],
+            'description': 'Enforce output schema validation on tool results'
+        },
+        'ContextMissError': {
+            'detection': [
+                Condition('context.requires_prior_context', ConditionOperator.EQUALS, True),
+                Condition('context.has_prior_context', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'context_missing'),
+                Action('append', 'context.warnings', 'Multi-step task requires prior context; carry forward state from previous steps'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings', 'Tool call failed because prior step context was not carried forward'),
+            ],
+            'description': 'Detect multi-step patterns where prior context is needed but missing'
+        },
     }
 
     def __init__(self):
