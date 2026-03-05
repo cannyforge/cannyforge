@@ -66,6 +66,8 @@ class Condition:
             return False
 
         elif self.operator == ConditionOperator.NOT_CONTAINS:
+            if not self.value:  # empty string is always contained
+                return False
             if isinstance(field_value, str):
                 return self.value.lower() not in field_value.lower()
             elif isinstance(field_value, (list, set)):
@@ -691,15 +693,19 @@ class RuleGenerator:
         # ── Tool Use Accuracy patterns ──────────────────────────────
         'WrongToolError': {
             'detection': [
-                Condition('context.selected_tool', ConditionOperator.NOT_CONTAINS, ''),
                 Condition('context.tool_match_confidence', ConditionOperator.LESS_THAN, 0.6),
             ],
             'remediation': [
                 Action('flag', '_flags', 'wrong_tool_risk'),
-                Action('append', 'context.warnings', 'Low tool-match confidence; verify tool selection against task intent'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously selected the wrong tool for tasks like this. '
+                       'Re-read the user\'s request carefully. Match the primary action verb to '
+                       'the correct tool before proceeding.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Wrong tool was selected; re-routing to correct tool based on intent keywords'),
+                Action('append', 'context.warnings',
+                       'STOP: The wrong tool was just used. Re-read the task and select the tool '
+                       'whose description best matches the primary action verb.'),
             ],
             'description': 'Flag when agent selects a tool that does not match task intent'
         },
@@ -709,10 +715,15 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'missing_param'),
-                Action('append', 'context.warnings', 'Required parameter missing; inject default or prompt for value'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously omitted required parameters for this type of tool call. '
+                       'Check every required parameter in the tool schema before calling. '
+                       'If a value is not explicitly stated, infer it from context or ask the user.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Tool call failed due to missing parameter; adding default value'),
+                Action('append', 'context.warnings',
+                       'Tool call failed because a required parameter was missing. '
+                       'Re-read the tool schema and supply all required parameters.'),
             ],
             'description': 'Detect when a required tool parameter is omitted'
         },
@@ -722,10 +733,15 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'param_type_mismatch'),
-                Action('append', 'context.warnings', 'Parameter type mismatch detected; coerce to expected type'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously passed parameters with the wrong type. '
+                       'Check the tool schema for expected types (string, int, float, bool) '
+                       'and convert your values before calling.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Tool call failed due to wrong parameter type; applying type coercion'),
+                Action('append', 'context.warnings',
+                       'Tool call failed because a parameter had the wrong type. '
+                       'Check the schema and convert the value to the expected type.'),
             ],
             'description': 'Flag when a tool parameter has the wrong type (e.g. string instead of int)'
         },
@@ -735,10 +751,14 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'extra_params'),
-                Action('append', 'context.warnings', 'Extraneous parameters detected; stripping unknown params'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously included extra parameters not in the tool schema. '
+                       'Only pass parameters listed in the tool definition. Remove any additional fields.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Tool call included extra parameters that caused confusion; removing them'),
+                Action('append', 'context.warnings',
+                       'Tool call failed because extra parameters were included. '
+                       'Only use parameters defined in the tool schema.'),
             ],
             'description': 'Strip unnecessary parameters that confuse tool execution'
         },
@@ -750,10 +770,16 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'ambiguous_request'),
-                Action('append', 'context.suggestions', 'Request is ambiguous; consider clarifying intent before tool selection'),
+                Action('append', 'context.suggestions',
+                       'WARNING: This request is ambiguous and could map to multiple tools. '
+                       'Before selecting a tool, identify the specific action the user wants '
+                       '(e.g., "find" could mean search_web, read_file, or run_command). '
+                       'Choose the tool whose description most precisely matches the intent.'),
             ],
             'recovery': [
-                Action('append', 'context.suggestions', 'Ambiguous request led to wrong tool; adding clarification step'),
+                Action('append', 'context.suggestions',
+                       'The ambiguous request led to the wrong tool. '
+                       'Re-read the request and pick the tool that matches the specific action needed.'),
             ],
             'description': 'Flag ambiguous requests that could map to multiple tools'
         },
@@ -763,10 +789,14 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'format_mismatch'),
-                Action('append', 'context.warnings', 'Output does not match expected schema; enforce validation'),
+                Action('append', 'context.warnings',
+                       'STOP: Previous tool calls returned output that did not match the expected schema. '
+                       'Validate your output format against the schema before returning results.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Tool output format mismatch; re-formatting to match expected schema'),
+                Action('append', 'context.warnings',
+                       'Tool output did not match the expected schema. '
+                       'Re-format the output to match the required structure.'),
             ],
             'description': 'Enforce output schema validation on tool results'
         },
@@ -777,17 +807,55 @@ class RuleGenerator:
             ],
             'remediation': [
                 Action('flag', '_flags', 'context_missing'),
-                Action('append', 'context.warnings', 'Multi-step task requires prior context; carry forward state from previous steps'),
+                Action('append', 'context.warnings',
+                       'STOP: This is a multi-step task that requires context from previous steps. '
+                       'Before calling any tool, check if you need data from a prior step '
+                       '(e.g., file contents, search results). Retrieve that data first.'),
             ],
             'recovery': [
-                Action('append', 'context.warnings', 'Tool call failed because prior step context was not carried forward'),
+                Action('append', 'context.warnings',
+                       'Tool call failed because prior step context was not carried forward. '
+                       'Go back and retrieve the required context before retrying.'),
             ],
             'description': 'Detect multi-step patterns where prior context is needed but missing'
         },
     }
 
+    _custom_patterns: Dict[str, Dict[str, Any]] = {}
+
     def __init__(self):
         self._rule_counter = 0
+
+    @classmethod
+    def register_pattern(cls, error_type: str, pattern: Dict[str, Any]):
+        """Register a new pattern at runtime.
+
+        Args:
+            error_type: Name of the error type (e.g., "MyCustomError")
+            pattern: Dict with required keys: 'detection', 'remediation', 'description'.
+                     Optional: 'recovery'. Values can be Condition/Action objects
+                     or raw dicts (which will be converted on use).
+
+        Raises:
+            ValueError: If required keys are missing.
+        """
+        required_keys = {'detection', 'remediation', 'description'}
+        missing = required_keys - set(pattern.keys())
+        if missing:
+            raise ValueError(f"Pattern missing required keys: {missing}")
+
+        # Convert raw dicts to Condition/Action objects if needed
+        converted = dict(pattern)
+        if converted['detection'] and isinstance(converted['detection'][0], dict):
+            converted['detection'] = [Condition.from_dict(c) for c in converted['detection']]
+        if converted['remediation'] and isinstance(converted['remediation'][0], dict):
+            converted['remediation'] = [Action.from_dict(a) for a in converted['remediation']]
+        if 'recovery' in converted and converted['recovery'] and isinstance(converted['recovery'][0], dict):
+            converted['recovery'] = [Action.from_dict(a) for a in converted['recovery']]
+
+        cls.PATTERN_LIBRARY[error_type] = converted
+        cls._custom_patterns[error_type] = converted
+        logger.info(f"Registered custom pattern: {error_type}")
 
     def _generate_rule_id(self, error_type: str) -> str:
         """Generate unique rule ID"""

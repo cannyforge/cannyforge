@@ -1,5 +1,6 @@
 """Tests for the LangGraph middleware adapter."""
 
+import threading
 import pytest
 from cannyforge.core import CannyForge
 from cannyforge.adapters.langgraph import CannyForgeMiddleware, LANGGRAPH_AVAILABLE
@@ -55,7 +56,8 @@ class TestCannyForgeMiddleware:
         state = {"messages": [{"content": "hello"}]}
         result = middleware.before_model(state)
         assert middleware.rules_applied == []
-        assert result is state
+        # Returns only the messages channel (not the full state)
+        assert result == {"messages": [{"content": "hello"}]}
 
     def test_before_model_applies_rules(self, middleware, forge):
         rule = Rule(
@@ -125,6 +127,117 @@ class TestCannyForgeMiddleware:
         # Returns a copy
         middleware.rules_applied.append("r3")
         assert len(middleware._rules_applied) == 2
+
+
+class TestWarningInjection:
+    """Test that warnings are injected into state['messages'] as visible content."""
+
+    @pytest.fixture
+    def forge(self, tmp_data_dir):
+        forge = CannyForge(data_dir=str(tmp_data_dir))
+        forge.reset()
+        return forge
+
+    @pytest.fixture
+    def middleware(self, forge):
+        return CannyForgeMiddleware(forge, skill_name="tool_use")
+
+    def test_warnings_appear_in_messages(self, middleware):
+        """Warnings from rules should be injected as a message, not just metadata."""
+        state = {"messages": [{"content": "do something"}]}
+        context = {
+            "context": {
+                "warnings": ["STOP: You picked the wrong tool before."],
+                "suggestions": ["Check the tool description carefully."],
+            },
+        }
+        result = middleware._apply_context_to_state(state, context)
+
+        messages = result["messages"]
+        assert len(messages) == 2  # injected + original
+
+        first = messages[0]
+        if isinstance(first, dict):
+            content = first.get("content", "")
+        else:
+            content = getattr(first, 'content', '')
+        assert "[CANNYFORGE]" in content
+        assert "STOP" in content
+
+    def test_no_injection_without_warnings(self, middleware):
+        """No message injection when there are no warnings/suggestions."""
+        state = {"messages": [{"content": "hello"}]}
+        context = {"context": {"warnings": [], "suggestions": []}}
+        result = middleware._apply_context_to_state(state, context)
+        assert len(result["messages"]) == 1
+
+    def test_before_model_injects_warnings_when_rules_fire(self, middleware, forge):
+        """Full integration: before_model should inject warnings into messages."""
+        rule = Rule(
+            id="rule_warn_1",
+            name="Test Warning Rule",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.tool_match_confidence",
+                         ConditionOperator.LESS_THAN, 0.6),
+            ],
+            actions=[
+                Action("append", "context.warnings",
+                      "STOP: Check your tool selection."),
+            ],
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+
+        state = {
+            "messages": [{"content": "do something"}],
+            "tool_match_confidence": 0.3,
+        }
+        result = middleware.before_model(state)
+
+        assert len(result["messages"]) == 2
+        first = result["messages"][0]
+        if isinstance(first, dict):
+            assert "STOP" in first["content"]
+        else:
+            assert "STOP" in first.content
+
+
+class TestConcurrency:
+    """Test that middleware is thread-safe."""
+
+    @pytest.fixture
+    def forge(self, tmp_data_dir):
+        forge = CannyForge(data_dir=str(tmp_data_dir))
+        forge.reset()
+        return forge
+
+    def test_thread_isolation(self, forge):
+        """Two threads calling before_model simultaneously get isolated contexts."""
+        middleware = CannyForgeMiddleware(forge, skill_name="tool_use")
+        results = {}
+        errors = []
+
+        def thread_fn(thread_id, task_content):
+            try:
+                state = {"messages": [{"content": task_content}]}
+                middleware.before_model(state)
+                ctx = middleware._last_context
+                results[thread_id] = ctx.get("task", {}).get("description", "")
+            except Exception as e:
+                errors.append((thread_id, str(e)))
+
+        t1 = threading.Thread(target=thread_fn, args=(1, "Task from thread 1"))
+        t2 = threading.Thread(target=thread_fn, args=(2, "Task from thread 2"))
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"Thread errors: {errors}"
+        assert results[1] == "Task from thread 1"
+        assert results[2] == "Task from thread 2"
 
 
 class TestLangGraphImport:

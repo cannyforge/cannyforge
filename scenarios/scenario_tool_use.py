@@ -304,8 +304,9 @@ def run_act(forge: CannyForge, simulator: ToolUseSimulator, num_tasks: int,
             for rule_id in rules_applied:
                 forge.knowledge_base.record_rule_outcome(rule_id, True)
 
-        if verbose and i % 5 == 0:
-            print(f"  Task {i:>3}/{num_tasks}: accuracy={results['successes']/i:.0%}")
+        if verbose:
+            ok = "OK  " if not errors else "FAIL"
+            print(f"  Task {i:>3}/{num_tasks}  [{ok}]  accuracy={results['successes']/i:.0%}")
 
     results["accuracy"] = results["successes"] / num_tasks if num_tasks else 0
     return results
@@ -329,6 +330,7 @@ def run_three_act_demo(speed: float = 0.0, verbose: bool = True,
 
     print("\n" + "=" * 70)
     print("  TOOL USE ACCURACY — CLOSED-LOOP LEARNING SCENARIO")
+    print("  [SIMULATION MODE - use --real for real LLM evaluation]")
     print("=" * 70)
     print("\n  6 tools | 24 tasks | 7 error types | 5% irreducible noise")
     print("  Error rates are CONSTANT — improvement only from learned rules\n")
@@ -534,9 +536,17 @@ def main():
                         help="Random seed for demo mode")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-task output")
+    parser.add_argument("--real", action="store_true",
+                        help="Use real LLM instead of simulation (requires API key)")
     args = parser.parse_args()
 
-    if args.benchmark:
+    if args.real:
+        # Redirect to the real E2E evaluation
+        print("Running real LLM evaluation (no simulation)...")
+        print("Redirecting to scenarios/eval_e2e.py\n")
+        from scenarios.eval_e2e import main as eval_main
+        eval_main()
+    elif args.benchmark:
         run_benchmark(num_tasks=args.tasks, num_seeds=args.seeds,
                       verbose=not args.quiet)
     else:
