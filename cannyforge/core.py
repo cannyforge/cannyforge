@@ -367,7 +367,11 @@ class CannyForge:
         Returns:
             LearningMetrics with cycle results
         """
-        return self.learning_engine.run_learning_cycle(min_frequency, min_confidence)
+        return self.learning_engine.run_learning_cycle(
+            min_frequency,
+            min_confidence,
+            llm_provider=self.llm_provider,
+        )
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive statistics"""

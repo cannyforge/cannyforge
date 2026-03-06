@@ -49,6 +49,7 @@ from cannyforge.learning import (
 )
 from cannyforge.tools import ToolDefinition, ToolExecutor, ToolRegistry
 from cannyforge.adapters.langgraph import CannyForgeMiddleware
+from cannyforge.corrections import Correction, CorrectionGenerator
 
 __version__ = "0.3.0"
 
@@ -94,4 +95,7 @@ __all__ = [
     "ToolRegistry",
     # Adapters
     "CannyForgeMiddleware",
+    # Corrections
+    "Correction",
+    "CorrectionGenerator",
 ]

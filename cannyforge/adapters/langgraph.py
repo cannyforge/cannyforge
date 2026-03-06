@@ -79,6 +79,14 @@ class CannyForgeMiddleware:
     def _rules_applied(self, value: List[str]):
         self._local.rules_applied = value
 
+    @property
+    def _corrections_injected(self) -> List[str]:
+        return getattr(self._local, 'corrections_injected', [])
+
+    @_corrections_injected.setter
+    def _corrections_injected(self, value: List[str]):
+        self._local.corrections_injected = value
+
     def _state_to_context(self, state: Any) -> Dict[str, Any]:
         """Convert LangGraph AgentState to CannyForge context dict.
 
@@ -235,8 +243,12 @@ class CannyForgeMiddleware:
         """
         context = self._state_to_context(state)
         self._rules_applied = []
+        self._corrections_injected = []
 
-        # Get and apply applicable rules
+        # Always-on corrections (LangGraph correction path)
+        corrections = self._forge.knowledge_base.get_corrections(self._skill_name)
+
+        # Conditional rules (backward-compatible path)
         applicable = self._forge.knowledge_base.get_applicable_rules(
             self._skill_name, context
         )
@@ -253,12 +265,50 @@ class CannyForgeMiddleware:
                 self._rules_applied,
             )
 
-        modified = self._apply_context_to_state(state, context)
+        if isinstance(state, dict):
+            state_dict = state
+        elif hasattr(state, '__dict__'):
+            state_dict = state.__dict__
+        else:
+            state_dict = {}
 
-        # Return only the messages channel — LangGraph manages the rest
-        if isinstance(modified, dict):
-            return {"messages": modified.get("messages", [])}
-        return modified
+        rule_ctx = context.get("context", {})
+        rule_warnings = rule_ctx.get("warnings", [])
+        rule_suggestions = rule_ctx.get("suggestions", [])
+        all_warnings = [c.content for c in corrections] + list(rule_warnings) + list(rule_suggestions)
+
+        messages = list(state_dict.get("messages", []))
+        if all_warnings:
+            text = "[CANNYFORGE] Learned rules for this request:\n" + "\n".join(
+                f"- {warning}" for warning in all_warnings
+            )
+            try:
+                from langchain_core.messages import SystemMessage
+                injection = SystemMessage(content=text)
+            except ImportError:
+                injection = {"role": "system", "content": text}
+
+            messages = [injection] + messages
+
+            for correction in corrections:
+                self._forge.knowledge_base.record_correction_injection(correction.id)
+                self._corrections_injected.append(correction.id)
+            if corrections:
+                self._forge.knowledge_base.save_corrections()
+
+        metadata = state_dict.get("metadata", {}) or {}
+        if rule_warnings:
+            metadata["cannyforge_warnings"] = list(rule_warnings)
+        if rule_suggestions:
+            metadata["cannyforge_suggestions"] = list(rule_suggestions)
+        if self._corrections_injected:
+            metadata["cannyforge_corrections"] = list(self._corrections_injected)
+        if metadata:
+            state_dict["metadata"] = metadata
+
+        state_dict["messages"] = messages
+
+        return {"messages": messages}
 
     def after_model(self, state: Any, runtime: Any = None) -> Any:
         """
@@ -302,6 +352,14 @@ class CannyForgeMiddleware:
             # Record success for applied rules
             for rule_id in self._rules_applied:
                 self._forge.knowledge_base.record_rule_outcome(rule_id, True)
+
+            # Corrections that were injected and did not recur are considered effective
+            if self._corrections_injected:
+                for correction_id in self._corrections_injected:
+                    self._forge.knowledge_base.record_correction_outcome(
+                        correction_id, True
+                    )
+                self._forge.knowledge_base.save_corrections()
 
         return state
 

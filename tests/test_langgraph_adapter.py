@@ -5,6 +5,7 @@ import pytest
 from cannyforge.core import CannyForge
 from cannyforge.adapters.langgraph import CannyForgeMiddleware, LANGGRAPH_AVAILABLE
 from cannyforge.knowledge import Rule, RuleType, Condition, ConditionOperator, Action
+from cannyforge.corrections import Correction
 
 
 class TestCannyForgeMiddleware:
@@ -83,6 +84,44 @@ class TestCannyForgeMiddleware:
         }
         result = middleware.before_model(state)
         assert "rule_test_1" in middleware.rules_applied
+
+    def test_before_model_injects_corrections(self, middleware, forge):
+        correction = Correction(
+            id="corr_a",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="When task asks for external news, use `search_web`, NOT `get_data`.",
+            source_errors=["e1"],
+            created_at=1.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", correction)
+
+        state = {"messages": [{"content": "Find latest AI news"}]}
+        result = middleware.before_model(state)
+
+        assert len(result["messages"]) == 2
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "[CANNYFORGE]" in content
+        assert "search_web" in content
+
+    def test_after_model_marks_correction_effective(self, middleware, forge):
+        correction = Correction(
+            id="corr_effective",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Choose tools carefully.",
+            source_errors=["e1"],
+            created_at=1.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", correction)
+
+        middleware.before_model({"messages": [{"content": "test request"}]})
+        middleware.after_model({"messages": [{"content": "normal output"}]})
+
+        saved = forge.knowledge_base.get_corrections("tool_use")[0]
+        assert saved.times_injected == 1
+        assert saved.times_effective == 1
 
     def test_after_model_no_errors(self, middleware):
         middleware._last_context = {"task": {"description": "test"}}

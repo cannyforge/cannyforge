@@ -15,6 +15,7 @@ from collections import defaultdict
 import random
 
 from cannyforge.knowledge import KnowledgeBase, Rule, RuleGenerator, RuleType, RuleStatus
+from cannyforge.corrections import CorrectionGenerator
 
 logger = logging.getLogger("Learning")
 
@@ -81,6 +82,7 @@ class LearningMetrics:
     errors_analyzed: int = 0
     patterns_detected: int = 0
     rules_generated: int = 0
+    corrections_generated: int = 0
     rules_applied_total: int = 0
     rule_success_rate: float = 0.0
 
@@ -89,6 +91,7 @@ class LearningMetrics:
             'errors_analyzed': self.errors_analyzed,
             'patterns_detected': self.patterns_detected,
             'rules_generated': self.rules_generated,
+            'corrections_generated': self.corrections_generated,
             'rules_applied_total': self.rules_applied_total,
             'rule_success_rate': self.rule_success_rate,
         }
@@ -479,6 +482,7 @@ class LearningEngine:
         self.success_repo = SuccessRepository(data_dir, storage_backend=storage_backend)
         self.pattern_detector = PatternDetector()
         self.rule_generator = RuleGenerator()
+        self.correction_generator = CorrectionGenerator()
 
         self.learning_cycles = 0
         self.total_rules_generated = 0
@@ -614,6 +618,26 @@ class LearningEngine:
                         self.total_rules_generated += 1
                         logger.info(f"Generated rule: {rule.name} for {skill_name}")
 
+                # Always generate correction text for LangGraph-facing injection.
+                type_errors = [e for e in errors if e.error_type == error_type]
+                correction = self.correction_generator.generate(
+                    skill_name=skill_name,
+                    error_type=error_type,
+                    errors=type_errors,
+                    llm_provider=llm_provider,
+                )
+                if correction:
+                    before_count = len(self.knowledge_base.get_corrections(skill_name))
+                    self.knowledge_base.add_correction(skill_name, correction)
+                    after_count = len(self.knowledge_base.get_corrections(skill_name))
+                    if after_count > before_count:
+                        metrics.corrections_generated += 1
+                        logger.info(
+                            "Generated correction for %s/%s",
+                            skill_name,
+                            error_type,
+                        )
+
             # Collect unclassified errors for pattern suggestion
             for e in errors:
                 if e.error_type == "GenericError" or e.error_type not in patterned_types:
@@ -689,6 +713,7 @@ class LearningEngine:
 
         # Save knowledge base
         self.knowledge_base.save_rules()
+        self.knowledge_base.save_corrections()
 
         logger.info(f"Learning cycle complete: {metrics.to_dict()}")
 

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 
+from cannyforge.corrections import Correction
+
 logger = logging.getLogger("Knowledge")
 
 
@@ -381,10 +383,14 @@ class KnowledgeBase:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.rules_file = self.data_dir / "rules.json"
+        self.corrections_file = self.data_dir / "corrections.json"
         self.rules_by_skill: Dict[str, List[Rule]] = defaultdict(list)
+        self.corrections_by_skill: Dict[str, List[Correction]] = defaultdict(list)
         self.rule_index: Dict[str, Rule] = {}  # id -> Rule
+        self.correction_index: Dict[str, Correction] = {}  # id -> Correction
 
         self._load_rules()
+        self._load_corrections()
 
     def _load_rules(self):
         """Load rules from storage"""
@@ -410,6 +416,34 @@ class KnowledgeBase:
             logger.debug(f"Saved {len(self.rule_index)} rules to storage")
         except Exception as e:
             logger.error(f"Error saving rules: {e}")
+
+    def _load_corrections(self):
+        """Load corrections from storage."""
+        if self.corrections_file.exists():
+            try:
+                data = json.loads(self.corrections_file.read_text())
+                for skill_name, corrections_data in data.items():
+                    for correction_data in corrections_data:
+                        correction = Correction.from_dict(correction_data)
+                        self.corrections_by_skill[skill_name].append(correction)
+                        self.correction_index[correction.id] = correction
+                logger.info(
+                    "Loaded %d corrections from storage",
+                    len(self.correction_index),
+                )
+            except Exception as e:
+                logger.error(f"Error loading corrections: {e}")
+
+    def save_corrections(self):
+        """Persist corrections to storage."""
+        try:
+            data = {}
+            for skill_name, corrections in self.corrections_by_skill.items():
+                data[skill_name] = [correction.to_dict() for correction in corrections]
+            self.corrections_file.write_text(json.dumps(data, indent=2))
+            logger.debug("Saved %d corrections to storage", len(self.correction_index))
+        except Exception as e:
+            logger.error(f"Error saving corrections: {e}")
 
     def add_rule(self, skill_name: str, rule: Rule):
         """Add a new rule for a skill.
@@ -456,6 +490,44 @@ class KnowledgeBase:
         """Get all rules for a skill above confidence threshold"""
         rules = self.rules_by_skill.get(skill_name, [])
         return [r for r in rules if r.confidence >= min_confidence]
+
+    def add_correction(self, skill_name: str, correction: Correction):
+        """Add or merge a correction for a skill."""
+        existing_by_id = self.correction_index.get(correction.id)
+        if existing_by_id:
+            existing_by_id.content = correction.content
+            existing_by_id.source_errors = sorted(
+                set(existing_by_id.source_errors + correction.source_errors)
+            )
+            return
+
+        for existing in self.corrections_by_skill[skill_name]:
+            if (existing.error_type == correction.error_type
+                    and existing.content.strip() == correction.content.strip()):
+                existing.source_errors = sorted(
+                    set(existing.source_errors + correction.source_errors)
+                )
+                return
+
+        self.corrections_by_skill[skill_name].append(correction)
+        self.correction_index[correction.id] = correction
+        logger.info("Added correction '%s' for skill '%s'", correction.id, skill_name)
+
+    def get_corrections(self, skill_name: str) -> List[Correction]:
+        """Get all corrections for a skill."""
+        return list(self.corrections_by_skill.get(skill_name, []))
+
+    def record_correction_injection(self, correction_id: str):
+        """Record that a correction was injected into a prompt."""
+        correction = self.correction_index.get(correction_id)
+        if correction:
+            correction.times_injected += 1
+
+    def record_correction_outcome(self, correction_id: str, effective: bool):
+        """Record whether a correction appears effective for this execution."""
+        correction = self.correction_index.get(correction_id)
+        if correction and effective:
+            correction.times_effective += 1
 
     def get_applicable_rules(self, skill_name: str, context: Dict[str, Any],
                             min_confidence: float = 0.3) -> List[Rule]:
@@ -576,11 +648,16 @@ class KnowledgeBase:
 
         return {
             'total_rules': total_rules,
+            'total_corrections': len(self.correction_index),
             'total_applications': total_applications,
             'total_successes': total_successes,
             'success_rate': total_successes / total_applications if total_applications > 0 else 0,
             'average_confidence': avg_confidence,
             'rules_by_skill': by_skill,
+            'corrections_by_skill': {
+                skill: len(corrections)
+                for skill, corrections in self.corrections_by_skill.items()
+            },
             'rules_by_status': by_status,
         }
 
