@@ -6,5 +6,6 @@ AI/agent frameworks. Each adapter is ~50-80 lines.
 
 Available adapters:
     - langchain: CannyForgeTool for LangChain
+    - langgraph: CannyForgeMiddleware for LangGraph agents
     - crewai: CannyForgeCrewTool for CrewAI
 """

@@ -6,6 +6,7 @@ Pattern detection that generates actionable rules with proper validation
 
 import logging
 import json
+import math
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
@@ -14,6 +15,7 @@ from collections import defaultdict
 import random
 
 from cannyforge.knowledge import KnowledgeBase, Rule, RuleGenerator, RuleType, RuleStatus
+from cannyforge.corrections import CorrectionGenerator
 
 logger = logging.getLogger("Learning")
 
@@ -80,6 +82,7 @@ class LearningMetrics:
     errors_analyzed: int = 0
     patterns_detected: int = 0
     rules_generated: int = 0
+    corrections_generated: int = 0
     rules_applied_total: int = 0
     rule_success_rate: float = 0.0
 
@@ -88,6 +91,7 @@ class LearningMetrics:
             'errors_analyzed': self.errors_analyzed,
             'patterns_detected': self.patterns_detected,
             'rules_generated': self.rules_generated,
+            'corrections_generated': self.corrections_generated,
             'rules_applied_total': self.rules_applied_total,
             'rule_success_rate': self.rule_success_rate,
         }
@@ -331,6 +335,24 @@ class SuccessRepository:
             self.successes_file.unlink()
 
 
+def _binomial_test(k: int, n: int, p: float) -> float:
+    """One-sided binomial test: P(X >= k) under Binomial(n, p).
+
+    Pure Python implementation using math.comb (no scipy needed).
+    Returns a p-value. Small p-value means the observed frequency k
+    is significantly higher than expected by chance at rate p.
+    """
+    if n <= 0 or p <= 0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+
+    p_value = 0.0
+    for i in range(k, n + 1):
+        p_value += math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i))
+    return min(p_value, 1.0)
+
+
 class PatternDetector:
     """
     Detects patterns in errors and suggests actionable rules
@@ -343,12 +365,12 @@ class PatternDetector:
 
     def detect_patterns(self, errors: List[ErrorRecord]) -> List[Tuple[str, float, int, Dict]]:
         """
-        Detect error patterns with context analysis.
+        Detect error patterns with context analysis and statistical significance.
 
-        Uses per-type frequency threshold only (min_frequency). The old
-        confidence gate (frequency / total_errors >= min_confidence) was
-        biased against minority error types when many error types co-exist.
-        If an error happens min_frequency+ times, it deserves a rule.
+        Filters:
+        1. Frequency >= min_frequency
+        2. Confidence >= 0.1 (error type is at least 10% of skill errors)
+        3. Binomial test p-value <= 0.05 (statistically significant)
 
         Returns:
             List of (error_type, confidence, frequency, context_features)
@@ -363,20 +385,40 @@ class PatternDetector:
 
         patterns = []
         total_errors = len(errors)
+        num_types = max(len(by_type), 1)
 
         for error_type, type_errors in by_type.items():
             frequency = len(type_errors)
 
-            if frequency >= self.min_frequency:
-                # Confidence scoped per-skill: use frequency relative to
-                # errors of the same skill, not all errors globally.
-                skill_errors = [e for e in errors if e.skill_name == type_errors[0].skill_name]
-                denominator = len(skill_errors) if skill_errors else total_errors
-                confidence = frequency / denominator
+            if frequency < self.min_frequency:
+                continue
 
-                # Extract common context features
-                context_features = self._extract_common_features(type_errors)
-                patterns.append((error_type, confidence, frequency, context_features))
+            # Confidence scoped per-skill: use frequency relative to
+            # errors of the same skill, not all errors globally.
+            skill_errors = [e for e in errors if e.skill_name == type_errors[0].skill_name]
+            denominator = len(skill_errors) if skill_errors else total_errors
+            confidence = frequency / denominator
+
+            # Minimum confidence floor: must be at least 10% of skill errors
+            if confidence < 0.1:
+                continue
+
+            # Statistical significance: is this error type occurring
+            # more than expected by chance? Only test when there are
+            # multiple error types to compare against.
+            if num_types > 1:
+                expected_rate = 1.0 / num_types
+                p_value = _binomial_test(frequency, total_errors, expected_rate)
+                if p_value > 0.05:
+                    logger.debug(
+                        "Skipping %s: not statistically significant (p=%.3f)",
+                        error_type, p_value,
+                    )
+                    continue
+
+            # Extract common context features
+            context_features = self._extract_common_features(type_errors)
+            patterns.append((error_type, confidence, frequency, context_features))
 
         # Sort by frequency
         patterns.sort(key=lambda x: x[2], reverse=True)
@@ -440,6 +482,7 @@ class LearningEngine:
         self.success_repo = SuccessRepository(data_dir, storage_backend=storage_backend)
         self.pattern_detector = PatternDetector()
         self.rule_generator = RuleGenerator()
+        self.correction_generator = CorrectionGenerator()
 
         self.learning_cycles = 0
         self.total_rules_generated = 0
@@ -509,9 +552,13 @@ class LearningEngine:
 
     def run_learning_cycle(self,
                           min_frequency: int = 3,
-                          min_confidence: float = 0.5) -> LearningMetrics:
+                          min_confidence: float = 0.5,
+                          llm_provider=None) -> LearningMetrics:
         """
-        Run a learning cycle: detect patterns and generate rules
+        Run a learning cycle: detect patterns and generate rules.
+
+        If llm_provider is given and there are unclassified/GenericError
+        errors (>= 5), suggest_pattern() is called to propose new patterns.
 
         Returns:
             LearningMetrics with cycle results
@@ -528,6 +575,9 @@ class LearningEngine:
 
         metrics.errors_analyzed = len(self.error_repo.errors)
 
+        # Track unclassified errors for pattern suggestion
+        unclassified_errors: List[ErrorRecord] = []
+
         # Detect patterns for each skill
         for skill_name, errors in errors_by_skill.items():
             if not errors:
@@ -540,6 +590,9 @@ class LearningEngine:
             # Detect patterns
             patterns = self.pattern_detector.detect_patterns(errors)
             metrics.patterns_detected += len(patterns)
+
+            # Collect error types that got patterns
+            patterned_types = {p[0] for p in patterns}
 
             # Generate rules for each pattern
             for error_type, confidence, frequency, features in patterns:
@@ -564,6 +617,31 @@ class LearningEngine:
                         metrics.rules_generated += 1
                         self.total_rules_generated += 1
                         logger.info(f"Generated rule: {rule.name} for {skill_name}")
+
+                # Always generate correction text for LangGraph-facing injection.
+                type_errors = [e for e in errors if e.error_type == error_type]
+                correction = self.correction_generator.generate(
+                    skill_name=skill_name,
+                    error_type=error_type,
+                    errors=type_errors,
+                    llm_provider=llm_provider,
+                )
+                if correction:
+                    before_count = len(self.knowledge_base.get_corrections(skill_name))
+                    self.knowledge_base.add_correction(skill_name, correction)
+                    after_count = len(self.knowledge_base.get_corrections(skill_name))
+                    if after_count > before_count:
+                        metrics.corrections_generated += 1
+                        logger.info(
+                            "Generated correction for %s/%s",
+                            skill_name,
+                            error_type,
+                        )
+
+            # Collect unclassified errors for pattern suggestion
+            for e in errors:
+                if e.error_type == "GenericError" or e.error_type not in patterned_types:
+                    unclassified_errors.append(e)
 
         # Pass 2: Generate RECOVERY rules from step-level errors
         step_errors_by_skill = defaultdict(list)
@@ -610,6 +688,24 @@ class LearningEngine:
                             f"for {skill_name}"
                         )
 
+        # Pass 3: Suggest new patterns for unclassified errors via LLM
+        if llm_provider and len(unclassified_errors) >= 5:
+            # Group unclassified by error_type
+            unclassified_by_type = defaultdict(list)
+            for e in unclassified_errors:
+                unclassified_by_type[e.error_type].append(e)
+
+            for error_type, type_errors in unclassified_by_type.items():
+                if len(type_errors) < 5:
+                    continue
+                examples = [e.to_dict() for e in type_errors[:5]]
+                suggested = RuleGenerator.suggest_pattern(
+                    error_type, examples, llm_provider
+                )
+                if suggested:
+                    RuleGenerator.register_pattern(error_type, suggested)
+                    logger.info(f"Registered suggested pattern: {error_type}")
+
         # Calculate rule success rate
         kb_stats = self.knowledge_base.get_statistics()
         metrics.rules_applied_total = kb_stats['total_applications']
@@ -617,6 +713,7 @@ class LearningEngine:
 
         # Save knowledge base
         self.knowledge_base.save_rules()
+        self.knowledge_base.save_corrections()
 
         logger.info(f"Learning cycle complete: {metrics.to_dict()}")
 

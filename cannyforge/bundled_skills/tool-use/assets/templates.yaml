@@ -1,0 +1,43 @@
+# Tool selection templates: match natural language intent to correct tool
+# Each template has match keywords and the expected tool + parameter hints
+
+calculate:
+  match: [calculate, compute, math, percentage, tip, sum, average, multiply, divide, add, subtract]
+  tool: calculate
+  params:
+    expression: { required: true, type: str }
+
+search_web:
+  match: [search, find, look up, latest, documentation, docs, google, web]
+  tool: search_web
+  params:
+    query: { required: true, type: str }
+    max_results: { required: false, type: int, default: 5 }
+
+read_file:
+  match: [read, show, display, cat, view, open, config]
+  tool: read_file
+  params:
+    path: { required: true, type: str }
+
+write_file:
+  match: [write, save, create file, store, output to]
+  tool: write_file
+  params:
+    path: { required: true, type: str }
+    content: { required: true, type: str }
+
+run_command:
+  match: [run, execute, command, shell, process, list, ps, grep, wc, ls, ping, curl]
+  tool: run_command
+  params:
+    cmd: { required: true, type: str }
+    timeout: { required: false, type: int, default: 30 }
+
+send_message:
+  match: [send, message, tell, notify, alert, email, slack]
+  tool: send_message
+  params:
+    to: { required: true, type: str }
+    body: { required: true, type: str }
+    channel: { required: false, type: str, default: "default" }

@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from cannyforge.knowledge import (
-    Condition, ConditionOperator, Action, Rule, RuleType,
+    Condition, ConditionOperator, Action, Rule, RuleType, RuleStatus,
     KnowledgeBase, RuleGenerator,
 )
 
@@ -222,3 +222,114 @@ class TestRecoveryRuleType:
         ctx = {"context": {"has_timezone": False}}
         result = knowledge_base.get_recovery_actions("email_writer", ctx)
         assert result["context"]["timezone"] == "UTC"
+
+
+class TestWrongToolErrorRegression:
+    """Regression tests for the WrongToolError detection fix (was broken by NOT_CONTAINS '')."""
+
+    def test_wrongtool_rule_matches_low_confidence(self):
+        """WrongToolError rule should fire when tool_match_confidence < 0.6."""
+        gen = RuleGenerator()
+        rule = gen.generate_rule_from_error("WrongToolError", frequency=5, confidence=0.8)
+        assert rule is not None
+
+        context = {
+            "task": {"description": "calculate something"},
+            "context": {
+                "selected_tool": "search_web",
+                "tool_match_confidence": 0.3,
+            },
+        }
+        assert rule.matches(context) is True
+
+    def test_wrongtool_rule_does_not_match_high_confidence(self):
+        """WrongToolError rule should NOT fire when tool_match_confidence >= 0.6."""
+        gen = RuleGenerator()
+        rule = gen.generate_rule_from_error("WrongToolError", frequency=5, confidence=0.8)
+
+        context = {
+            "task": {"description": "calculate something"},
+            "context": {
+                "selected_tool": "calculate",
+                "tool_match_confidence": 0.9,
+            },
+        }
+        assert rule.matches(context) is False
+
+    def test_not_contains_empty_string_returns_false(self):
+        """NOT_CONTAINS with empty string value must always return False."""
+        cond = Condition("context.selected_tool", ConditionOperator.NOT_CONTAINS, "")
+        ctx = {"context": {"selected_tool": "anything"}}
+        assert cond.evaluate(ctx) is False
+
+    def test_not_contains_empty_string_with_empty_field(self):
+        """NOT_CONTAINS '' must return False even when field is empty."""
+        cond = Condition("context.selected_tool", ConditionOperator.NOT_CONTAINS, "")
+        ctx = {"context": {"selected_tool": ""}}
+        assert cond.evaluate(ctx) is False
+
+    def test_wrongtool_warning_is_actionable(self):
+        """The WrongToolError remediation warning should contain 'STOP'."""
+        pattern = RuleGenerator.PATTERN_LIBRARY["WrongToolError"]
+        # Find the append action that adds to warnings
+        for action in pattern["remediation"]:
+            if action.action_type == "append" and action.target == "context.warnings":
+                assert "STOP" in action.value
+                break
+        else:
+            pytest.fail("No warning action found in WrongToolError remediation")
+
+
+class TestRuntimePatternRegistration:
+    """Test that custom patterns can be registered at runtime."""
+
+    def test_register_and_generate(self):
+        """Register a custom pattern and generate a rule from it."""
+        RuleGenerator.register_pattern("CustomTestError", {
+            "detection": [
+                Condition("context.custom_flag", ConditionOperator.EQUALS, True),
+            ],
+            "remediation": [
+                Action("flag", "_flags", "custom_test"),
+                Action("append", "context.warnings", "Custom warning"),
+            ],
+            "description": "Test custom pattern",
+        })
+
+        gen = RuleGenerator()
+        rule = gen.generate_rule_from_error("CustomTestError", frequency=5, confidence=0.7)
+        assert rule is not None
+        assert rule.source_error_type == "CustomTestError"
+
+        # Clean up
+        del RuleGenerator.PATTERN_LIBRARY["CustomTestError"]
+        del RuleGenerator._custom_patterns["CustomTestError"]
+
+    def test_register_with_raw_dicts(self):
+        """Register a custom pattern using raw dicts instead of objects."""
+        RuleGenerator.register_pattern("DictTestError", {
+            "detection": [
+                {"field": "context.x", "operator": "equals", "value": True},
+            ],
+            "remediation": [
+                {"action_type": "flag", "target": "_flags", "value": "dict_test"},
+            ],
+            "description": "Test dict-based pattern",
+        })
+
+        assert "DictTestError" in RuleGenerator.PATTERN_LIBRARY
+        # Conditions should be Condition objects, not dicts
+        cond = RuleGenerator.PATTERN_LIBRARY["DictTestError"]["detection"][0]
+        assert isinstance(cond, Condition)
+
+        # Clean up
+        del RuleGenerator.PATTERN_LIBRARY["DictTestError"]
+        del RuleGenerator._custom_patterns["DictTestError"]
+
+    def test_register_missing_keys_raises(self):
+        """Registration without required keys should raise ValueError."""
+        with pytest.raises(ValueError, match="missing required keys"):
+            RuleGenerator.register_pattern("BadError", {
+                "detection": [],
+                # missing 'remediation' and 'description'
+            })
