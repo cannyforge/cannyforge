@@ -324,7 +324,22 @@ class CannyForge:
         # Add common aliases
         for alias, etype in [('spam', 'SpamTriggerError'),
                              ('vague', 'PoorQueryError'),
-                             ('query', 'PoorQueryError')]:
+                             ('query', 'PoorQueryError'),
+                             # Tool use accuracy aliases
+                             ('wrong tool', 'WrongToolError'),
+                             ('incorrect tool', 'WrongToolError'),
+                             ('missing param', 'MissingParamError'),
+                             ('required param', 'MissingParamError'),
+                             ('wrong type', 'WrongParamTypeError'),
+                             ('type mismatch', 'WrongParamTypeError'),
+                             ('extra param', 'ExtraParamError'),
+                             ('unnecessary param', 'ExtraParamError'),
+                             ('ambiguous', 'AmbiguityError'),
+                             ('unclear', 'AmbiguityError'),
+                             ('format', 'FormatError'),
+                             ('schema', 'FormatError'),
+                             ('missing context', 'ContextMissError'),
+                             ('prior context', 'ContextMissError')]:
             pattern = re.compile(r'\b' + re.escape(alias) + r'\b')
             # Only add if not already covered
             if not any(p.pattern == pattern.pattern for p in keywords):
@@ -352,7 +367,11 @@ class CannyForge:
         Returns:
             LearningMetrics with cycle results
         """
-        return self.learning_engine.run_learning_cycle(min_frequency, min_confidence)
+        return self.learning_engine.run_learning_cycle(
+            min_frequency,
+            min_confidence,
+            llm_provider=self.llm_provider,
+        )
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive statistics"""

@@ -130,10 +130,13 @@ class TestLearningEngine:
         metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
         assert metrics.patterns_detected >= 1
         assert metrics.rules_generated >= 1
+        assert metrics.corrections_generated >= 1
 
         # Verify rule was added to knowledge base
         rules = knowledge_base.get_rules("email_writer")
         assert len(rules) >= 1
+        corrections = knowledge_base.get_corrections("email_writer")
+        assert len(corrections) >= 1
 
     def test_clear_data(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)

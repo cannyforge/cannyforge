@@ -1,6 +1,6 @@
 [project]
 name = "cannyforge"
-version = "0.2.0"
+version = "0.2.1"
 description = "Self-improving agents with closed-loop learning — agents that learn to get it right"
 readme = "README.md"
 license = {text = "BSL-1.1"}
@@ -26,11 +26,13 @@ dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 claude = ["anthropic>=0.39.0"]
 openai = ["openai>=1.0.0"]
 deepseek = ["openai>=1.0.0"]
+langgraph = ["langgraph>=0.2.0"]
 mcp = ["mcp[cli]>=1.0.0"]
 dashboard = ["streamlit>=1.30.0"]
 all = [
     "anthropic>=0.39.0",
     "openai>=1.0.0",
+    "langgraph>=0.2.0",
     "mcp[cli]>=1.0.0",
     "streamlit>=1.30.0",
 ]
