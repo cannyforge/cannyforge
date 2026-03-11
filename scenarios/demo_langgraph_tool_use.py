@@ -24,6 +24,8 @@ load_dotenv()
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 
 from cannyforge import CannyForge
 from cannyforge.adapters.langgraph import CannyForgeMiddleware
@@ -83,7 +85,9 @@ llm_kwargs = {"model": os.environ.get("MODEL_FAST", "deepseek-chat"),
 base_url = os.environ.get("LLM_BASE_URL")
 if base_url:
     llm_kwargs["base_url"] = base_url
+
 llm = ChatOpenAI(**llm_kwargs)
+print(f"Model: {llm_kwargs['model']}")
 
 # ── Step 3: The 3-line integration ───────────────────────────────────────────
 forge = CannyForge(llm_provider=None)

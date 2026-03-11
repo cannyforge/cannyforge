@@ -8,6 +8,8 @@ CannyForge watches your agent make mistakes, learns corrections, and injects the
 Agent makes errors → CannyForge learns corrections → Agent stops repeating them
 ```
 
+![CannyForge demo: 80% → 100% on real LLM](docs/demo.gif)
+
 ## Quick Start (LangGraph)
 
 ```python
