@@ -10,8 +10,13 @@ Report:  Print before/after accuracy and fixed tasks.
 import logging
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Tuple
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -36,7 +41,7 @@ for _name in (
     "httpx", "httpcore", "openai", "langgraph", "langchain",
     "CannyForge", "Knowledge", "Learning",
 ):
-    logging.getLogger(_name).setLevel(logging.WARNING)
+    logging.getLogger(_name).setLevel(logging.ERROR)
 
 
 @tool
