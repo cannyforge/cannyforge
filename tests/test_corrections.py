@@ -72,6 +72,29 @@ class TestCorrectionGenerator:
 
 
 class TestCorrectionKnowledge:
+    def test_effectiveness_property(self):
+        unused = Correction(
+            id="corr_unused",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Choose the right tool.",
+            source_errors=["e1"],
+            created_at=1.0,
+        )
+        effective = Correction(
+            id="corr_effective",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Choose the right tool.",
+            source_errors=["e2"],
+            created_at=1.0,
+            times_injected=4,
+            times_effective=3,
+        )
+
+        assert unused.effectiveness == -1.0
+        assert effective.effectiveness == 0.75
+
     def test_add_get_and_persist_corrections(self, tmp_data_dir):
         kb = KnowledgeBase(tmp_data_dir)
         correction = Correction(

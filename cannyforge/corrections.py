@@ -27,6 +27,13 @@ class Correction:
     times_injected: int = 0
     times_effective: int = 0
 
+    @property
+    def effectiveness(self) -> float:
+        """Fraction of injections that were effective. -1.0 if never injected."""
+        if self.times_injected == 0:
+            return -1.0
+        return self.times_effective / self.times_injected
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,

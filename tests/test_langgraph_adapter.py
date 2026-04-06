@@ -1,5 +1,6 @@
 """Tests for the LangGraph middleware adapter."""
 
+from time import time
 import threading
 import pytest
 from cannyforge.core import CannyForge
@@ -44,6 +45,7 @@ class TestCannyForgeMiddleware:
     def test_state_to_context_empty(self, middleware):
         ctx = middleware._state_to_context({})
         assert ctx["task"]["description"] == ""
+        assert ctx["context"]["tool_match_confidence"] == 0.5
         assert ctx["context"]["has_required_params"] is True
 
     def test_state_to_context_message_object(self, middleware):
@@ -123,6 +125,33 @@ class TestCannyForgeMiddleware:
         assert saved.times_injected == 1
         assert saved.times_effective == 1
 
+    def test_after_model_records_correction_failure_then_success(self, middleware, forge):
+        correction = Correction(
+            id="corr_failure",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Choose tools carefully.",
+            source_errors=["e1"],
+            created_at=1.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", correction)
+
+        middleware.before_model({"messages": [{"content": "test request"}]})
+        middleware.after_model({
+            "messages": [{"type": "tool", "status": "error", "content": "WrongToolError: bad tool"}],
+        })
+
+        failed = forge.knowledge_base.get_corrections("tool_use")[0]
+        assert failed.times_injected == 1
+        assert failed.times_effective == 0
+
+        middleware.before_model({"messages": [{"content": "test request"}]})
+        middleware.after_model({"messages": [{"content": "normal output"}]})
+
+        recovered = forge.knowledge_base.get_corrections("tool_use")[0]
+        assert recovered.times_injected == 2
+        assert recovered.times_effective == 1
+
     def test_after_model_no_errors(self, middleware):
         middleware._last_context = {"task": {"description": "test"}}
         state = {"messages": [{"content": "result"}]}
@@ -145,6 +174,68 @@ class TestCannyForgeMiddleware:
         errors = forge.learning_engine.error_repo.errors
         assert len(errors) >= 1
         assert errors[-1].error_type == "WrongToolError"
+
+    def test_before_model_uses_low_confidence_default_for_rule_matching(self, middleware, forge):
+        rule = Rule(
+            id="rule_default_conf",
+            name="Default confidence rule",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.tool_match_confidence",
+                         ConditionOperator.LESS_THAN, 0.6),
+            ],
+            actions=[
+                Action("append", "context.warnings", "Low confidence default fired"),
+            ],
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+
+        result = middleware.before_model({})
+
+        assert "rule_default_conf" in middleware.rules_applied
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Low confidence default fired" in content
+
+    @pytest.mark.parametrize(
+        ("times_injected", "times_effective", "age_days", "expected_injected"),
+        [
+            (10, 2, 40, False),
+            (10, 2, 10, True),
+            (3, 0, 40, True),
+        ],
+    )
+    def test_before_model_filters_only_stale_ineffective_corrections(
+        self,
+        middleware,
+        forge,
+        times_injected,
+        times_effective,
+        age_days,
+        expected_injected,
+    ):
+        correction = Correction(
+            id=f"corr_{times_injected}_{times_effective}_{age_days}",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Filtered correction.",
+            source_errors=["e1"],
+            created_at=time() - age_days * 86400,
+            times_injected=times_injected,
+            times_effective=times_effective,
+        )
+        forge.knowledge_base.add_correction("tool_use", correction)
+
+        result = middleware.before_model({"messages": [{"content": "test request"}]})
+        message_count = len(result["messages"])
+
+        if expected_injected:
+            assert correction.id in middleware._corrections_injected
+            assert message_count == 2
+        else:
+            assert correction.id not in middleware._corrections_injected
+            assert message_count == 1
 
     def test_apply_context_to_state(self, middleware):
         state = {"messages": []}
