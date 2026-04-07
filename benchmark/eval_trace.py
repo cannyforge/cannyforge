@@ -134,11 +134,10 @@ def detect_context_amnesia(trace: List[TraceEntry], anti_pattern: Dict) -> bool:
 
     seen_successful: Set[Tuple[str, str]] = set()
     for entry in trace:
-        key = (entry.tool, _stable_args_key(entry.args))
         if target_tool and entry.tool != target_tool:
-            seen_successful.add(key)
-            continue
+            continue  # only track the monitored tool
         if entry.status == "ok":
+            key = (entry.tool, _stable_args_key(entry.args))
             if key in seen_successful:
                 return True
             seen_successful.add(key)
@@ -167,10 +166,11 @@ class TraceEvaluator:
     """Evaluate an agent's tool-call trace against a scenario definition."""
 
     DEFAULT_WEIGHTS = {
-        "tool_selection": 0.30,
-        "arg_quality": 0.30,
+        "tool_selection": 0.25,
+        "arg_quality": 0.25,
         "sequence": 0.25,
         "recovery": 0.15,
+        "efficiency": 0.10,
     }
 
     def evaluate(self, scenario: Dict, trace: List[TraceEntry]) -> TraceScore:
@@ -196,10 +196,11 @@ class TraceEvaluator:
         })
 
         composite = (
-            weights.get("tool_selection", 0.3) * tool_score
-            + weights.get("arg_quality", 0.3) * arg_score
+            weights.get("tool_selection", 0.25) * tool_score
+            + weights.get("arg_quality", 0.25) * arg_score
             + weights.get("sequence", 0.25) * seq_score
             + weights.get("recovery", 0.15) * recovery
+            + weights.get("efficiency", 0.10) * efficiency
         )
 
         # Anti-pattern penalty: -0.1 per hit, floor at 0
@@ -312,23 +313,18 @@ class TraceEvaluator:
 
     @staticmethod
     def _strict_sequence_score(actual: List[str], expected: List[str]) -> float:
-        """Score based on longest prefix match of expected in actual."""
+        """Score based on exact positional match: expected[i] must equal actual[i].
+
+        This is stricter than subsequence — no extra tools between expected calls
+        and no tolerance for reordering.
+        """
         if not expected:
             return 1.0
 
-        matched = 0
-        actual_idx = 0
-        for exp_tool in expected:
-            # Find this tool in remaining actual calls
-            while actual_idx < len(actual):
-                if actual[actual_idx] == exp_tool:
-                    matched += 1
-                    actual_idx += 1
-                    break
-                actual_idx += 1
-            else:
-                break
-
+        matched = sum(
+            1 for i, exp_tool in enumerate(expected)
+            if i < len(actual) and actual[i] == exp_tool
+        )
         return matched / len(expected)
 
     @staticmethod

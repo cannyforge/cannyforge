@@ -74,6 +74,16 @@ class CorrectionGenerator:
         "show", "create", "write", "run", "execute", "generate", "task",
     }
 
+    # Map error_type (from learning engine) → correction_type bucket for injection grouping
+    _ERROR_TYPE_MAP: Dict[str, str] = {
+        "SequenceViolationError": "sequence",
+        "RetryLoopError": "retry",
+        "HallucinatedToolError": "hallucination",
+        "ContextMissError": "context",
+        "WrongToolError": "tool_selection",
+        "FormatError": "arg_format",
+    }
+
     def __init__(self, llm_provider=None):
         self._llm = llm_provider
 
@@ -103,6 +113,7 @@ class CorrectionGenerator:
             content=content,
             source_errors=self._source_error_ids(error_list),
             created_at=time(),
+            correction_type=self._ERROR_TYPE_MAP.get(error_type, "general"),
         )
 
     def _source_error_ids(self, errors: List[Any]) -> List[str]:

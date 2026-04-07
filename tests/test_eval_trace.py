@@ -220,10 +220,9 @@ class TestSequenceScore:
             ],
             "ordering": "strict",
         }
-        # edit_file appears first, doesn't match read_file → only 1 of 2 matched
-        # Actually: looking for read_file in [edit_file, read_file] → finds at idx 1
-        # Then looking for edit_file from idx 2 → not found → 1/2 = 0.5
-        assert self.evaluator._score_sequence(trace, expected) == 0.5
+        # Strict = positional match: actual[0]=edit_file ≠ read_file, actual[1]=read_file ≠ edit_file
+        # 0 out of 2 slots match → 0.0
+        assert self.evaluator._score_sequence(trace, expected) == 0.0
 
     def test_partial_subsequence(self):
         trace = [
@@ -333,6 +332,6 @@ class TestCompositeEvaluation:
         score = self.evaluator.evaluate(scenario, [])
         assert score.tool_selection_score == 0.0
         assert score.sequence_score == 0.0
-        # arg_quality=1.0 (no args_contain) and recovery=1.0 (no injections)
-        # so composite = 0.3*0 + 0.3*1 + 0.25*0 + 0.15*1 = 0.45
-        assert score.composite_score == 0.45
+        # arg_quality=1.0 (no args_contain) and recovery=1.0 (no injections) and efficiency=0.0 (no calls)
+        # composite = 0.25*0 + 0.25*1 + 0.25*0 + 0.15*1 + 0.10*0 = 0.40
+        assert score.composite_score == 0.40
