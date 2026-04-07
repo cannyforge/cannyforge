@@ -1,0 +1,31 @@
+{
+  "id": "data_005",
+  "domain": "data",
+  "title": "Re-fetching data already retrieved",
+  "difficulty": "medium",
+  "failure_modes": ["context_amnesia"],
+  "setup": {
+    "databases": {
+      "market": {
+        "NVDA": {"2024-01-02": 481.7, "2024-06-03": 1208.9, "2024-12-31": 1389.5}
+      }
+    }
+  },
+  "user_message": "Get NVDA stock data for 2024 and tell me the year-over-year return percentage",
+  "tools": ["fetch_economic_data", "fetch_market_data", "query_db", "create_chart", "validate_data"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "fetch_market_data", "args_contain": {"symbol": "NVDA"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 3
+  },
+  "anti_patterns": [
+    {
+      "id": "refetch_nvda",
+      "type": "context_amnesia",
+      "detect": {"tool": "fetch_market_data", "type": "context_amnesia"}
+    }
+  ],
+  "error_injections": []
+}

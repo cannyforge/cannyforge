@@ -896,6 +896,61 @@ class RuleGenerator:
             ],
             'description': 'Detect multi-step patterns where prior context is needed but missing'
         },
+        # ── Trace-level anti-pattern patterns ───────────────────────
+        'SequenceViolationError': {
+            'detection': [
+                Condition('context.sequence_violation_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'sequence_violation'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously called tools out of order. '
+                       'Read before editing. Validate before acting. '
+                       'Check that prerequisite tools have already run before calling any tool that depends on their output.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because a required prior step was skipped. '
+                       'Go back and complete the prerequisite step before retrying.'),
+            ],
+            'description': 'Flag when a tool is called before its required prerequisite'
+        },
+        'RetryLoopError': {
+            'detection': [
+                Condition('context.retry_loop_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'retry_loop'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously retried the same failing call without changes. '
+                       'If a tool call fails, do not repeat it identically. '
+                       'Change the arguments, try a different tool, or ask the user for clarification.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Identical retry detected after failure. '
+                       'Change your approach: modify the arguments or select a different tool.'),
+            ],
+            'description': 'Detect when the same tool+args is retried after an error without modification'
+        },
+        'HallucinatedToolError': {
+            'detection': [
+                Condition('context.hallucinated_tool_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'hallucinated_tool'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously called tools that do not exist. '
+                       'Only call tools listed in the provided tool definitions. '
+                       'Do not invent tool names. If no available tool fits, say so.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'A non-existent tool was called. '
+                       'Review the available tool list and select only tools that are defined.'),
+            ],
+            'description': 'Detect when the agent calls a tool not in the available tool set'
+        },
     }
 
     _custom_patterns: Dict[str, Dict[str, Any]] = {}

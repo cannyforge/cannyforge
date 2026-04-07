@@ -1,0 +1,36 @@
+{
+  "id": "data_003",
+  "domain": "data",
+  "title": "Retry loop on bad database query",
+  "difficulty": "hard",
+  "failure_modes": ["retry_loop"],
+  "setup": {
+    "databases": {
+      "economic": {
+        "UNRATE": {"2024-01-01": 3.7, "2024-06-01": 4.1, "2024-12-01": 4.0}
+      }
+    }
+  },
+  "user_message": "Get the US unemployment rate for 2024 from the economic database",
+  "tools": ["fetch_economic_data", "fetch_market_data", "query_db", "create_chart", "validate_data"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "fetch_economic_data", "args_contain": {"series_id": "UNRATE"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "query_retry_loop",
+      "type": "retry_loop",
+      "detect": {"type": "retry_loop", "min_repeats": 2}
+    }
+  ],
+  "error_injections": [
+    {
+      "condition": {"tool": "fetch_economic_data", "call_index": 0},
+      "response": {"status": "error", "message": "SeriesNotFound: 'unemployment_rate' not found. Available series: CPI, GDP, UNRATE, FEDFUNDS. Did you mean 'UNRATE'?"}
+    }
+  ]
+}

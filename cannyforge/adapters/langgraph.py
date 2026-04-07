@@ -289,13 +289,45 @@ class CannyForgeMiddleware:
         rule_ctx = context.get("context", {})
         rule_warnings = rule_ctx.get("warnings", [])
         rule_suggestions = rule_ctx.get("suggestions", [])
-        all_warnings = [c.content for c in corrections] + list(rule_warnings) + list(rule_suggestions)
 
         messages = list(state_dict.get("messages", []))
-        if all_warnings:
-            text = "[CANNYFORGE] Learned rules for this request:\n" + "\n".join(
-                f"- {warning}" for warning in all_warnings
-            )
+
+        # Build structured injection: group corrections by correction_type, then append rule warnings
+        correction_sections: Dict[str, List[str]] = {}
+        for c in corrections:
+            bucket = c.correction_type or "general"
+            correction_sections.setdefault(bucket, []).append(c.content)
+
+        section_order = ["sequence", "retry", "hallucination", "tool_selection", "general"]
+        section_labels = {
+            "sequence": "Sequence rules",
+            "retry": "Retry / recovery rules",
+            "hallucination": "Tool existence rules",
+            "tool_selection": "Tool selection rules",
+            "general": "Learned corrections",
+        }
+
+        correction_blocks = []
+        for key in section_order:
+            if key in correction_sections:
+                label = section_labels[key]
+                items = "\n".join(f"  - {line}" for line in correction_sections[key])
+                correction_blocks.append(f"[{label}]\n{items}")
+        # Any unexpected correction_type keys not in section_order
+        for key, lines in correction_sections.items():
+            if key not in section_order:
+                items = "\n".join(f"  - {line}" for line in lines)
+                correction_blocks.append(f"[{key}]\n{items}")
+
+        all_rule_warnings = list(rule_warnings) + list(rule_suggestions)
+
+        all_warnings_exist = correction_blocks or all_rule_warnings
+        if all_warnings_exist:
+            parts = ["[CANNYFORGE] Learned rules for this request:"]
+            parts.extend(correction_blocks)
+            if all_rule_warnings:
+                parts.append("[Pattern rules]\n" + "\n".join(f"  - {w}" for w in all_rule_warnings))
+            text = "\n".join(parts)
             try:
                 from langchain_core.messages import SystemMessage
                 injection = SystemMessage(content=text)

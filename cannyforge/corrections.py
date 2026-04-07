@@ -26,6 +26,7 @@ class Correction:
     created_at: float
     times_injected: int = 0
     times_effective: int = 0
+    correction_type: str = ""  # e.g. "sequence", "retry", "hallucination", "tool_selection"
 
     @property
     def effectiveness(self) -> float:
@@ -44,6 +45,7 @@ class Correction:
             "created_at": self.created_at,
             "times_injected": self.times_injected,
             "times_effective": self.times_effective,
+            "correction_type": self.correction_type,
         }
 
     @classmethod
@@ -57,6 +59,7 @@ class Correction:
             created_at=float(data.get("created_at", time())),
             times_injected=int(data.get("times_injected", 0)),
             times_effective=int(data.get("times_effective", 0)),
+            correction_type=data.get("correction_type", ""),
         )
 
 
