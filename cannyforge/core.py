@@ -360,9 +360,13 @@ class CannyForge:
 
     def run_learning_cycle(self,
                           min_frequency: int = 3,
-                          min_confidence: float = 0.5) -> LearningMetrics:
+                          min_confidence: float = 0.5,
+                          llm_provider: Any = None) -> LearningMetrics:
         """
         Run a learning cycle to detect patterns and generate rules
+
+        Args:
+            llm_provider: Optional override; falls back to self.llm_provider if None
 
         Returns:
             LearningMetrics with cycle results
@@ -370,7 +374,7 @@ class CannyForge:
         return self.learning_engine.run_learning_cycle(
             min_frequency,
             min_confidence,
-            llm_provider=self.llm_provider,
+            llm_provider=llm_provider or self.llm_provider,
         )
 
     def export_skill(self, skill_name: str, output_path: str) -> None:
