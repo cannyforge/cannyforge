@@ -827,6 +827,66 @@ def build_fresh_forge() -> CannyForge:
     return forge
 
 
+# ── Checkpoint helpers ────────────────────────────────────────────────────────
+
+def _save_phase_checkpoint(run_dir: Path, phase_name: str,
+                           results: List[TaskResult]) -> None:
+    """Save phase results to a checkpoint JSONL file."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cp = run_dir / f"ckpt_{phase_name}.jsonl"
+    with cp.open("w") as f:
+        for r in results:
+            f.write(json.dumps(r.to_dict()) + "\n")
+
+
+def _load_phase_checkpoint(run_dir: Path, phase_name: str) -> Optional[List[TaskResult]]:
+    """Load phase results from checkpoint.  Returns None if checkpoint missing."""
+    cp = run_dir / f"ckpt_{phase_name}.jsonl"
+    if not cp.exists():
+        return None
+    results = []
+    with cp.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            results.append(TaskResult(
+                id=d["id"], set=d["set"], task=d["task"],
+                expected=d["expected"], actual=d["actual"],
+                correct=d["correct"], difficulty=d["difficulty"],
+                confusion_pair=d["confusion_pair"],
+                confusable_with=d.get("confusable_with", ""),
+                correction_injected=d.get("correction_injected", False),
+                condition=d["condition"],
+                param_score=d.get("param_score", -1.0),
+                sequence_correct=d.get("sequence_correct"),
+                recovery_attempted=d.get("recovery_attempted", False),
+                recovery_succeeded=d.get("recovery_succeeded", False),
+                error=d.get("error"),
+            ))
+    return results
+
+
+def _save_learning_checkpoint(run_dir: Path, forge: CannyForge) -> None:
+    """Save forge corrections so they survive a resume."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    corrections = forge.knowledge_base.get_corrections("tool_use_fsi")
+    with (run_dir / "ckpt_corrections.json").open("w") as f:
+        json.dump([c.to_dict() for c in corrections], f, indent=2)
+
+
+def _load_learning_checkpoint(run_dir: Path, forge: CannyForge) -> bool:
+    """Restore corrections into forge from checkpoint.  Returns True if loaded."""
+    cp = run_dir / "ckpt_corrections.json"
+    if not cp.exists():
+        return False
+    from cannyforge.corrections import Correction
+    corrections_data = json.loads(cp.read_text())
+    for cdata in corrections_data:
+        forge.knowledge_base.add_correction("tool_use_fsi", Correction.from_dict(cdata))
+    return True
+
+
 def learn_from_failures(forge: CannyForge, results: List[TaskResult], llm_provider=None):
     failures = [r for r in results if not r.correct and r.actual != "error"]
     for r in failures:
@@ -1071,6 +1131,8 @@ def main():
                         help="API base URL for the learning model (if different from agent endpoint)")
     parser.add_argument("--learning-api-key", default=None, dest="learning_api_key",
                         help="API key for the learning model (if different from agent key)")
+    parser.add_argument("--resume", default=None, metavar="RUN_DIR",
+                        help="Resume from a previous run directory (skips completed phases)")
     args = parser.parse_args()
 
     print("=" * 72)
@@ -1121,7 +1183,11 @@ def main():
         print(f"Delay : {args.delay}s between calls")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = RESULTS_DIR / f"run_{model_slug}_{ts}"
+    run_dir = Path(args.resume) if args.resume else RESULTS_DIR / f"run_{model_slug}_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.resume:
+        print(f"Resuming from: {run_dir}")
 
     phases: Dict[str, List[TaskResult]] = {}
     corrections: List = []
@@ -1136,42 +1202,61 @@ def main():
     agent_baseline = make_baseline_agent(llm, no_think)
     agent_static = make_static_agent(llm, no_think)
 
+    # Helper to run or load a phase from checkpoint
+    def run_or_load(phase_name, agent, tasks, condition, label, mw=None):
+        cached = _load_phase_checkpoint(run_dir, phase_name)
+        if cached is not None:
+            c = sum(r.correct for r in cached)
+            print(f"\n{label}")
+            print(f"  ↳ resumed from checkpoint ({c}/{len(cached)} correct)")
+            return cached
+        results = run_phase(agent, tasks, condition, label,
+                            middleware=mw, delay=args.delay)
+        _save_phase_checkpoint(run_dir, phase_name, results)
+        return results
+
     # ── Set A ──────────────────────────────────────────────────────────────
     if run_a:
-        phases["a_baseline"] = run_phase(
-            agent_baseline, tasks_a, "baseline",
-            "Phase 1/8 — Set A  baseline", delay=args.delay)
+        phases["a_baseline"] = run_or_load(
+            "a_baseline", agent_baseline, tasks_a, "baseline",
+            "Phase 1/8 — Set A  baseline")
 
-        # Learn from Set A failures
-        print("\nLearning cycle")
-        print("-" * 14)
-        if learning_provider:
-            print(f"  Using LLM-based corrections ({args.learning_model})")
-        metrics = learn_from_failures(forge, phases["a_baseline"], llm_provider=learning_provider)
-        corrections = forge.knowledge_base.get_corrections("tool_use_fsi")
+        # Learn from Set A failures (or restore from checkpoint)
+        if _load_learning_checkpoint(run_dir, forge):
+            corrections = forge.knowledge_base.get_corrections("tool_use_fsi")
+            print(f"\nLearning cycle\n  ↳ resumed from checkpoint ({len(corrections)} corrections)")
+        else:
+            print("\nLearning cycle")
+            print("-" * 14)
+            if learning_provider:
+                print(f"  Using LLM-based corrections ({args.learning_model})")
+            metrics = learn_from_failures(forge, phases["a_baseline"], llm_provider=learning_provider)
+            corrections = forge.knowledge_base.get_corrections("tool_use_fsi")
+            _save_learning_checkpoint(run_dir, forge)
+
+            print(f"  Errors analyzed     : {metrics.errors_analyzed}")
+            print(f"  Patterns detected   : {metrics.patterns_detected}")
+            print(f"  Corrections generated: {metrics.corrections_generated}")
+            for i, c in enumerate(corrections, 1):
+                print(f"  {i}. {c.content}")
+
         middleware = CannyForgeMiddleware(forge, skill_name="tool_use_fsi")
         agent_cf = make_cannyforge_agent(llm, middleware, no_think)
         agent_static_cf = make_static_cf_agent(llm, middleware, no_think)
 
-        print(f"  Errors analyzed     : {metrics.errors_analyzed}")
-        print(f"  Patterns detected   : {metrics.patterns_detected}")
-        print(f"  Corrections generated: {metrics.corrections_generated}")
-        for i, c in enumerate(corrections, 1):
-            print(f"  {i}. {c.content}")
+        phases["a_static"] = run_or_load(
+            "a_static", agent_static, tasks_a, "static",
+            "Phase 2/8 — Set A  static prompt only")
 
-        phases["a_static"] = run_phase(
-            agent_static, tasks_a, "static",
-            "Phase 2/8 — Set A  static prompt only", delay=args.delay)
-
-        phases["a_cannyforge"] = run_phase(
-            agent_cf, tasks_a, "cannyforge",
+        phases["a_cannyforge"] = run_or_load(
+            "a_cannyforge", agent_cf, tasks_a, "cannyforge",
             "Phase 3/8 — Set A  CannyForge only (baseline + corrections)",
-            middleware=middleware, delay=args.delay)
+            mw=middleware)
 
-        phases["a_static_cf"] = run_phase(
-            agent_static_cf, tasks_a, "static+cf",
+        phases["a_static_cf"] = run_or_load(
+            "a_static_cf", agent_static_cf, tasks_a, "static+cf",
             "Phase 4/8 — Set A  static + CannyForge (production scenario)",
-            middleware=middleware, delay=args.delay)
+            mw=middleware)
 
     # ── Set B ──────────────────────────────────────────────────────────────
     if run_b:
@@ -1180,23 +1265,23 @@ def main():
             agent_cf = make_cannyforge_agent(llm, middleware, no_think)
             agent_static_cf = make_static_cf_agent(llm, middleware, no_think)
 
-        phases["b_baseline"] = run_phase(
-            agent_baseline, tasks_b, "baseline",
-            "Phase 5/8 — Set B  baseline (held-out, no correction)", delay=args.delay)
+        phases["b_baseline"] = run_or_load(
+            "b_baseline", agent_baseline, tasks_b, "baseline",
+            "Phase 5/8 — Set B  baseline (held-out, no correction)")
 
-        phases["b_static"] = run_phase(
-            agent_static, tasks_b, "static",
-            "Phase 6/8 — Set B  static prompt only", delay=args.delay)
+        phases["b_static"] = run_or_load(
+            "b_static", agent_static, tasks_b, "static",
+            "Phase 6/8 — Set B  static prompt only")
 
-        phases["b_cannyforge"] = run_phase(
-            agent_cf, tasks_b, "cannyforge",
+        phases["b_cannyforge"] = run_or_load(
+            "b_cannyforge", agent_cf, tasks_b, "cannyforge",
             "Phase 7/8 — Set B  CannyForge only (baseline + corrections)",
-            middleware=middleware, delay=args.delay)
+            mw=middleware)
 
-        phases["b_static_cf"] = run_phase(
-            agent_static_cf, tasks_b, "static+cf",
+        phases["b_static_cf"] = run_or_load(
+            "b_static_cf", agent_static_cf, tasks_b, "static+cf",
             "Phase 8/8 — Set B  static + CannyForge (key result: production scenario)",
-            middleware=middleware, delay=args.delay)
+            mw=middleware)
 
     summary = save_artifacts(run_dir, phases, corrections, model_name)
     print_summary(summary)
