@@ -150,10 +150,11 @@ class Action:
                 self._set_field_value(result, self.target, current)
 
         elif self.action_type == "flag":
-            flags = result.get('_flags', set())
-            if isinstance(flags, list):
-                flags = set(flags)
-            flags.add(self.value)
+            flags = result.get('_flags', [])
+            if isinstance(flags, set):
+                flags = list(flags)
+            if self.value not in flags:
+                flags.append(self.value)
             result['_flags'] = flags
 
         elif self.action_type == "transform":
