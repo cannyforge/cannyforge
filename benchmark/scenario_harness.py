@@ -556,10 +556,13 @@ class ScenarioHarness:
         no_think: bool = False,
         static_prompt: Optional[str] = None,
         learning_llm: Any = None,
+        run_dir: Optional[Path] = None,
     ) -> Dict[str, List[RunResult]]:
         """Full 4-condition ablation against a real LLM.
 
-        Order: baseline → learn → cannyforge → static+cf (if static_prompt given).
+        Order: baseline → static → learn → cannyforge → static+cf.
+        When *run_dir* is provided, completed phases are checkpointed and
+        can be skipped on a ``--resume`` invocation.
         """
         try:
             from cannyforge.adapters.langgraph import CannyForgeMiddleware
@@ -571,49 +574,59 @@ class ScenarioHarness:
             "baseline": [], "static": [], "cannyforge": [], "static+cf": []
         }
 
+        def _run_or_load(phase: str, runner, label: str) -> List[RunResult]:
+            if run_dir is not None:
+                cached = _load_phase_checkpoint(run_dir, phase)
+                if cached is not None:
+                    ok = sum(1 for r in cached if r.score.composite_score >= 0.5)
+                    print(f"\n[{label}] resumed from checkpoint "
+                          f"({ok}/{len(cached)} composite≥0.5)")
+                    return cached
+            print(f"\n[{label}] {len(self.scenarios)} scenarios...")
+            phase_results: List[RunResult] = []
+            for s in self.scenarios:
+                r = runner.run(s, phase)
+                phase_results.append(r)
+                _print_result(r)
+            if run_dir is not None:
+                _save_phase_checkpoint(run_dir, phase, phase_results)
+            return phase_results
+
         # -- Baseline --
-        print(f"\n[baseline] {len(self.scenarios)} scenarios...")
         runner_base = LLMScenarioRunner(llm, no_think=no_think)
-        for s in self.scenarios:
-            r = runner_base.run(s, "baseline")
-            all_results["baseline"].append(r)
-            _print_result(r)
+        all_results["baseline"] = _run_or_load("baseline", runner_base, "baseline")
 
         # -- Static --
         if static_prompt:
-            print(f"\n[static] {len(self.scenarios)} scenarios...")
             runner_static = LLMScenarioRunner(llm, no_think=no_think, system_prompt=static_prompt)
-            for s in self.scenarios:
-                r = runner_static.run(s, "static")
-                all_results["static"].append(r)
-                _print_result(r)
+            all_results["static"] = _run_or_load("static", runner_static, "static")
 
         # -- Learn --
-        print("\n[learning] Learning from baseline failures...")
-        n = self._learn_from_trace_failures(
-            forge, all_results["baseline"], skill_name, learning_llm
-        )
-        print(f"[learning] {n} corrections/rules generated")
+        learned_from_cache = False
+        if run_dir is not None and _load_learning_checkpoint(run_dir, forge):
+            n_corr = len(forge.knowledge_base.get_corrections(skill_name))
+            print(f"\n[learning] resumed from checkpoint ({n_corr} corrections)")
+            learned_from_cache = True
+        if not learned_from_cache:
+            print("\n[learning] Learning from baseline failures...")
+            n = self._learn_from_trace_failures(
+                forge, all_results["baseline"], skill_name, learning_llm
+            )
+            print(f"[learning] {n} corrections/rules generated")
+            if run_dir is not None:
+                _save_learning_checkpoint(run_dir, forge)
 
         # -- CannyForge --
-        print(f"\n[cannyforge] {len(self.scenarios)} scenarios...")
         mw = CannyForgeMiddleware(forge, skill_name=skill_name)
         runner_cf = LLMScenarioRunner(llm, middleware=mw, no_think=no_think)
-        for s in self.scenarios:
-            r = runner_cf.run(s, "cannyforge")
-            all_results["cannyforge"].append(r)
-            _print_result(r)
+        all_results["cannyforge"] = _run_or_load("cannyforge", runner_cf, "cannyforge")
 
         # -- Static+CF --
         if static_prompt:
-            print(f"\n[static+cf] {len(self.scenarios)} scenarios...")
             mw2 = CannyForgeMiddleware(forge, skill_name=skill_name)
             runner_scf = LLMScenarioRunner(llm, middleware=mw2, no_think=no_think,
                                            system_prompt=static_prompt)
-            for s in self.scenarios:
-                r = runner_scf.run(s, "static+cf")
-                all_results["static+cf"].append(r)
-                _print_result(r)
+            all_results["static+cf"] = _run_or_load("static_cf", runner_scf, "static+cf")
 
         return all_results
 
@@ -626,8 +639,6 @@ class ScenarioHarness:
         skill_name: str,
         learning_llm: Any = None,
     ) -> int:
-        from cannyforge.learning import ErrorRecord
-
         _TYPE_MAP = {
             "sequence_violation": ("SequenceViolationError", "sequence"),
             "retry_loop": ("RetryLoopError", "retry"),
@@ -643,35 +654,32 @@ class ScenarioHarness:
             for ap_id in score.anti_patterns_hit:
                 ap_type = self._get_ap_type(result.scenario_id, ap_id)
                 error_type, _ = _TYPE_MAP.get(ap_type, ("WrongToolError", "tool_selection"))
-                forge.learning_engine.record_error(ErrorRecord(
-                    timestamp=datetime.now(),
+                forge.learning_engine.record_error(
                     skill_name=skill_name,
                     task_description=task_desc,
                     error_type=error_type,
                     error_message=f"Anti-pattern [{ap_id}] in trace",
                     context_snapshot={"scenario_id": result.scenario_id,
                                       "composite": score.composite_score},
-                ))
+                )
 
             if score.arg_quality_score < 1.0 and not score.anti_patterns_hit:
-                forge.learning_engine.record_error(ErrorRecord(
-                    timestamp=datetime.now(),
+                forge.learning_engine.record_error(
                     skill_name=skill_name,
                     task_description=task_desc,
                     error_type="FormatError",
                     error_message=f"arg_quality={score.arg_quality_score:.2f}",
                     context_snapshot={"scenario_id": result.scenario_id},
-                ))
+                )
 
             if score.tool_selection_score < 1.0 and not score.anti_patterns_hit:
-                forge.learning_engine.record_error(ErrorRecord(
-                    timestamp=datetime.now(),
+                forge.learning_engine.record_error(
                     skill_name=skill_name,
                     task_description=task_desc,
                     error_type="WrongToolError",
                     error_message=f"tool_selection={score.tool_selection_score:.2f}",
                     context_snapshot={"scenario_id": result.scenario_id},
-                ))
+                )
 
         metrics = forge.run_learning_cycle(
             min_frequency=2,
@@ -837,6 +845,78 @@ class ScenarioHarness:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint helpers (mirror bench_fsi80 pattern)
+# ---------------------------------------------------------------------------
+
+
+def _save_phase_checkpoint(
+    run_dir: Path, phase_name: str, results: List[RunResult]
+) -> None:
+    """Save phase results to a checkpoint JSONL file."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cp = run_dir / f"ckpt_{phase_name}.jsonl"
+    with cp.open("w") as f:
+        for r in results:
+            f.write(json.dumps(r.to_dict()) + "\n")
+
+
+def _load_phase_checkpoint(
+    run_dir: Path, phase_name: str
+) -> Optional[List[RunResult]]:
+    """Load phase results from checkpoint.  Returns None if missing."""
+    cp = run_dir / f"ckpt_{phase_name}.jsonl"
+    if not cp.exists():
+        return None
+    results: List[RunResult] = []
+    with cp.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            score = TraceScore(
+                scenario_id=d.get("scenario_id", ""),
+                tool_selection_score=d.get("tool_selection_score", 0.0),
+                arg_quality_score=d.get("arg_quality_score", 0.0),
+                sequence_score=d.get("sequence_score", 0.0),
+                anti_pattern_count=d.get("anti_pattern_count", 0),
+                anti_patterns_hit=d.get("anti_patterns_hit", []),
+                recovery_score=d.get("recovery_score", 0.0),
+                call_efficiency=d.get("call_efficiency", 0.0),
+                composite_score=d.get("composite_score", 0.0),
+                failure_modes_exhibited=d.get("failure_modes_exhibited", []),
+            )
+            results.append(RunResult(
+                scenario_id=d["scenario_id"],
+                condition=d["condition"],
+                score=score,
+                elapsed_ms=d.get("elapsed_ms", 0.0),
+                correction_injected=d.get("correction_injected", False),
+                error=d.get("error"),
+            ))
+    return results
+
+
+def _save_learning_checkpoint(run_dir: Path, forge: Any) -> None:
+    """Save forge corrections so they survive a resume."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    corrections = forge.knowledge_base.get_corrections("tool_use")
+    with (run_dir / "ckpt_corrections.json").open("w") as f:
+        json.dump([c.to_dict() for c in corrections], f, indent=2)
+
+
+def _load_learning_checkpoint(run_dir: Path, forge: Any) -> bool:
+    """Restore corrections into forge from checkpoint.  Returns True if loaded."""
+    cp = run_dir / "ckpt_corrections.json"
+    if not cp.exists():
+        return False
+    from cannyforge.corrections import Correction
+    corrections_data = json.loads(cp.read_text())
+    for cdata in corrections_data:
+        forge.knowledge_base.add_correction("tool_use", Correction.from_dict(cdata))
+    return True
+
+
+# ---------------------------------------------------------------------------
 # LLM / CLI helpers
 # ---------------------------------------------------------------------------
 
@@ -941,6 +1021,8 @@ def main() -> None:
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--scenarios-dir", default=str(SCENARIOS_DIR))
     parser.add_argument("--results-dir", default=str(RESULTS_DIR))
+    parser.add_argument("--resume", default=None, metavar="RUN_DIR",
+                        help="Resume from a previous run directory (skips completed phases)")
     args = parser.parse_args()
 
     harness = ScenarioHarness(args.scenarios_dir, domains=args.domains)
@@ -983,14 +1065,19 @@ def main() -> None:
             DOMAIN_STATIC_PROMPTS[d] for d in args.domains if d in DOMAIN_STATIC_PROMPTS
         ) or None
 
+        if args.resume:
+            run_dir = Path(args.resume)
+        else:
+            run_dir = (Path(args.results_dir)
+                       / f"scenario_{run_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+
         results = harness.run_ablation_with_llm(
             llm=llm, forge=forge, skill_name="tool_use",
             no_think=args.no_think, static_prompt=static_prompt,
             learning_llm=learning_llm,
+            run_dir=run_dir,
         )
         harness.print_summary(results)
-        run_dir = (Path(args.results_dir)
-                   / f"scenario_{run_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         harness.save_artifacts(
             results, run_dir,
             corrections=forge.knowledge_base.get_corrections("tool_use"),
