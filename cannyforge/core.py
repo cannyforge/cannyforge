@@ -360,9 +360,13 @@ class CannyForge:
 
     def run_learning_cycle(self,
                           min_frequency: int = 3,
-                          min_confidence: float = 0.5) -> LearningMetrics:
+                          min_confidence: float = 0.5,
+                          llm_provider: Any = None) -> LearningMetrics:
         """
         Run a learning cycle to detect patterns and generate rules
+
+        Args:
+            llm_provider: Optional override; falls back to self.llm_provider if None
 
         Returns:
             LearningMetrics with cycle results
@@ -370,8 +374,69 @@ class CannyForge:
         return self.learning_engine.run_learning_cycle(
             min_frequency,
             min_confidence,
-            llm_provider=self.llm_provider,
+            llm_provider=llm_provider or self.llm_provider,
         )
+
+    def export_skill(self, skill_name: str, output_path: str) -> None:
+        """Export portable corrections for a skill to a .cannyforge bundle."""
+        import json
+        import zipfile
+        from time import time
+
+        corrections = self.knowledge_base.get_corrections(skill_name)
+        exportable = [
+            correction for correction in corrections
+            if correction.effectiveness == -1.0 or correction.effectiveness >= 0.4
+        ]
+
+        manifest = {
+            "skill_name": skill_name,
+            "exported_at": time(),
+            "cannyforge_version": "0.3.0",
+            "correction_count": len(exportable),
+        }
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+            bundle.writestr(
+                "corrections.json",
+                json.dumps([correction.to_dict() for correction in exportable], indent=2),
+            )
+
+            skill_md = Path(__file__).parent / "bundled_skills" / skill_name / "SKILL.md"
+            if skill_md.exists():
+                bundle.write(skill_md, "SKILL.md")
+
+    def import_skill(self, bundle_path: str, confidence_discount: float = 0.5) -> int:
+        """Import corrections from a .cannyforge bundle into the local knowledge base."""
+        import json
+        import zipfile
+
+        from cannyforge.corrections import Correction
+
+        _ = confidence_discount
+        bundle = Path(bundle_path)
+        if not bundle.exists():
+            raise FileNotFoundError(f"Bundle not found: {bundle_path}")
+
+        imported = 0
+        with zipfile.ZipFile(bundle, "r") as archive:
+            if "corrections.json" not in archive.namelist():
+                raise ValueError("Bundle missing corrections.json")
+
+            corrections_data = json.loads(archive.read("corrections.json"))
+            for correction_data in corrections_data:
+                correction = Correction.from_dict(correction_data)
+                correction.times_injected = 0
+                correction.times_effective = 0
+                self.knowledge_base.add_correction(correction.skill_name, correction)
+                imported += 1
+
+        self.knowledge_base.save_corrections()
+        return imported
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive statistics"""

@@ -20,6 +20,7 @@ Requires: pip install langgraph>=0.2.0
 import json
 import logging
 import threading
+from time import time
 from typing import Any, Dict, List, Optional
 
 try:
@@ -33,6 +34,10 @@ except ImportError:
         pass
 
 logger = logging.getLogger("CannyForge.LangGraph")
+
+STALE_DAYS = 30
+MIN_EFFECTIVENESS_TO_KEEP = 0.3
+MIN_INJECTIONS_FOR_DEPRECATION = 5
 
 
 class CannyForgeMiddleware:
@@ -125,7 +130,7 @@ class CannyForgeMiddleware:
             "task": {"description": task_description},
             "context": {
                 "selected_tool": selected_tool,
-                "tool_match_confidence": state_dict.get("tool_match_confidence", 1.0),
+                "tool_match_confidence": state_dict.get("tool_match_confidence", 0.5),
                 "has_required_params": state_dict.get("has_required_params", True),
                 "has_type_mismatch": state_dict.get("has_type_mismatch", False),
                 "has_extra_params": state_dict.get("has_extra_params", False),
@@ -247,6 +252,15 @@ class CannyForgeMiddleware:
 
         # Always-on corrections (LangGraph correction path)
         corrections = self._forge.knowledge_base.get_corrections(self._skill_name)
+        now = time()
+        corrections = [
+            correction for correction in corrections
+            if not (
+                correction.times_injected >= MIN_INJECTIONS_FOR_DEPRECATION
+                and correction.effectiveness < MIN_EFFECTIVENESS_TO_KEEP
+                and (now - correction.created_at) > STALE_DAYS * 86400
+            )
+        ]
 
         # Conditional rules (backward-compatible path)
         applicable = self._forge.knowledge_base.get_applicable_rules(
@@ -275,13 +289,45 @@ class CannyForgeMiddleware:
         rule_ctx = context.get("context", {})
         rule_warnings = rule_ctx.get("warnings", [])
         rule_suggestions = rule_ctx.get("suggestions", [])
-        all_warnings = [c.content for c in corrections] + list(rule_warnings) + list(rule_suggestions)
 
         messages = list(state_dict.get("messages", []))
-        if all_warnings:
-            text = "[CANNYFORGE] Learned rules for this request:\n" + "\n".join(
-                f"- {warning}" for warning in all_warnings
-            )
+
+        # Build structured injection: group corrections by correction_type, then append rule warnings
+        correction_sections: Dict[str, List[str]] = {}
+        for c in corrections:
+            bucket = c.correction_type or "general"
+            correction_sections.setdefault(bucket, []).append(c.content)
+
+        section_order = ["sequence", "retry", "hallucination", "tool_selection", "general"]
+        section_labels = {
+            "sequence": "Sequence rules",
+            "retry": "Retry / recovery rules",
+            "hallucination": "Tool existence rules",
+            "tool_selection": "Tool selection rules",
+            "general": "Learned corrections",
+        }
+
+        correction_blocks = []
+        for key in section_order:
+            if key in correction_sections:
+                label = section_labels[key]
+                items = "\n".join(f"  - {line}" for line in correction_sections[key])
+                correction_blocks.append(f"[{label}]\n{items}")
+        # Any unexpected correction_type keys not in section_order
+        for key, lines in correction_sections.items():
+            if key not in section_order:
+                items = "\n".join(f"  - {line}" for line in lines)
+                correction_blocks.append(f"[{key}]\n{items}")
+
+        all_rule_warnings = list(rule_warnings) + list(rule_suggestions)
+
+        all_warnings_exist = correction_blocks or all_rule_warnings
+        if all_warnings_exist:
+            parts = ["[CANNYFORGE] Learned rules for this request:"]
+            parts.extend(correction_blocks)
+            if all_rule_warnings:
+                parts.append("[Pattern rules]\n" + "\n".join(f"  - {w}" for w in all_rule_warnings))
+            text = "\n".join(parts)
             try:
                 from langchain_core.messages import SystemMessage
                 injection = SystemMessage(content=text)
@@ -347,6 +393,13 @@ class CannyForgeMiddleware:
                 # Record failure for applied rules
                 for rule_id in self._rules_applied:
                     self._forge.knowledge_base.record_rule_outcome(rule_id, False)
+
+        if found_error and self._corrections_injected:
+            for correction_id in self._corrections_injected:
+                self._forge.knowledge_base.record_correction_outcome(
+                    correction_id, False
+                )
+            self._forge.knowledge_base.save_corrections()
 
         if not found_error:
             # Record success for applied rules
