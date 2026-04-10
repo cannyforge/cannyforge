@@ -1,0 +1,29 @@
+{
+  "id": "coding_004",
+  "domain": "coding",
+  "title": "Calling a non-existent compile tool",
+  "difficulty": "easy",
+  "failure_modes": ["hallucinated_tool"],
+  "setup": {
+    "files": {
+      "/workspace/main.rs": "fn main() {\n    println!(\"Hello, world!\");\n}\n"
+    }
+  },
+  "user_message": "Compile and run the Rust program at /workspace/main.rs",
+  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "run_test", "args_contain": {"command": "main.rs"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "hallucinated_compile",
+      "type": "hallucinated_tool",
+      "detect": {"type": "hallucinated_tool"}
+    }
+  ],
+  "error_injections": []
+}

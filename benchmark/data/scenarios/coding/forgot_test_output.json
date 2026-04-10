@@ -1,0 +1,30 @@
+{
+  "id": "coding_005",
+  "domain": "coding",
+  "title": "Re-running test when output already available",
+  "difficulty": "medium",
+  "failure_modes": ["context_amnesia"],
+  "setup": {
+    "files": {
+      "/workspace/test_math.py": "def test_add():\n    assert 1 + 1 == 2\n\ndef test_subtract():\n    assert 5 - 3 == 2\n",
+      "/workspace/math_utils.py": "def add(a, b):\n    return a + b\n\ndef subtract(a, b):\n    return a - b\n"
+    }
+  },
+  "user_message": "Run the tests in test_math.py and then fix any failures. If all pass, tell me the results.",
+  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "run_test", "args_contain": {"test_file": "test_math"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "rerun_test",
+      "type": "context_amnesia",
+      "detect": {"tool": "run_test", "type": "context_amnesia"}
+    }
+  ],
+  "error_injections": []
+}

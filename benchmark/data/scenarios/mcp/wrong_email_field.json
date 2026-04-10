@@ -1,0 +1,36 @@
+{
+  "id": "mcp_002",
+  "domain": "mcp",
+  "title": "Wrong field name in email tool",
+  "difficulty": "medium",
+  "failure_modes": ["arg_mangling"],
+  "setup": {
+    "contacts": {
+      "alice": {"email": "alice@example.com", "name": "Alice Chen"}
+    }
+  },
+  "user_message": "Send an email to Alice about the quarterly review tomorrow",
+  "tools": ["check_calendar", "schedule_meeting", "send_email", "search_web", "read_file"],
+  "expected_trace": {
+    "calls": [
+      {
+        "tool": "send_email",
+        "args_contain": {
+          "to": "alice",
+          "subject": "quarterly|review",
+          "body": "."
+        },
+        "optional": false
+      }
+    ],
+    "ordering": "partial",
+    "max_calls": 3
+  },
+  "anti_patterns": [],
+  "error_injections": [
+    {
+      "condition": {"tool": "send_email", "has_unexpected_arg": "recipient"},
+      "response": {"status": "error", "message": "TypeError: send_email() got unexpected keyword argument 'recipient'. Use 'to' for the recipient address."}
+    }
+  ]
+}

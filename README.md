@@ -27,6 +27,19 @@ agent = create_react_agent(model, tools,
 # After learning, before_model injects corrections as SystemMessages.
 ```
 
+## v0.3 Direction
+
+The benchmark branch is focused on three adoption-oriented improvements:
+
+- better reliability loops for tool-using agents
+- broader benchmark coverage for arguments, multi-step execution, and recovery
+- portable learned skills for assistant and workflow reuse
+
+This is aimed at modern agent stacks, including LangGraph, LangChain-style tool agents,
+CrewAI-style orchestration, MCP-connected assistants, and personal assistant workflows.
+
+See [docs/v0.3-public.md](/home/xiwei/pg/cannyforge/docs/v0.3-public.md) for the public summary.
+
 ## How It Works
 
 1. **Record errors** — `after_model` detects tool failures and records them
@@ -91,6 +104,20 @@ pip install -e .
 | `scenarios/demo.py` | Animated terminal demo (internal skill system) |
 
 Older demo scripts are in `scenarios/archive/` for reference.
+
+## Framework Coverage
+
+| Surface | Current repo path |
+|--------|-------------------|
+| LangGraph middleware | `cannyforge/adapters/langgraph.py` |
+| LangChain adapter | `cannyforge/adapters/langchain.py` |
+| CrewAI adapter | `cannyforge/adapters/crewai.py` |
+| MCP server | `cannyforge/mcp_server.py` |
+| Bundled assistant skills | `cannyforge/bundled_skills/` |
+
+CannyForge is designed to sit on top of existing agent frameworks rather than replace them.
+The public focus for v0.3 is improved tool routing, argument quality, multi-step execution, and
+reusable skills.
 
 ## Core Architecture
 

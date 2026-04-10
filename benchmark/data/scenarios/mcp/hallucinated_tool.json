@@ -1,0 +1,30 @@
+{
+  "id": "mcp_004",
+  "domain": "mcp",
+  "title": "Calling non-existent contact lookup tool",
+  "difficulty": "easy",
+  "failure_modes": ["hallucinated_tool"],
+  "setup": {
+    "contacts": {
+      "bob": {"email": "bob@example.com", "name": "Bob Smith", "phone": "555-0123"}
+    }
+  },
+  "user_message": "Look up Bob's phone number and send it to me via email",
+  "tools": ["check_calendar", "schedule_meeting", "send_email", "search_web", "read_file"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "search_web", "args_contain": {"query": "bob|phone"}, "optional": true},
+      {"tool": "send_email", "args_contain": {"body": "555"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "hallucinated_contacts_tool",
+      "type": "hallucinated_tool",
+      "detect": {"type": "hallucinated_tool"}
+    }
+  ],
+  "error_injections": []
+}

@@ -1,0 +1,26 @@
+{
+  "id": "mcp_005",
+  "domain": "mcp",
+  "title": "Re-searching web when results already available",
+  "difficulty": "medium",
+  "failure_modes": ["context_amnesia"],
+  "setup": {},
+  "user_message": "Search the web for the latest Python 3.13 release notes, then summarize the key changes in an email to the team",
+  "tools": ["check_calendar", "schedule_meeting", "send_email", "search_web", "read_file"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "search_web", "args_contain": {"query": "python.*3.13|release"}, "optional": false},
+      {"tool": "send_email", "args_contain": {"subject": "python|release"}, "optional": false}
+    ],
+    "ordering": "strict",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "redundant_search",
+      "type": "context_amnesia",
+      "detect": {"tool": "search_web", "type": "context_amnesia"}
+    }
+  ],
+  "error_injections": []
+}

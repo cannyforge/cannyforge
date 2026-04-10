@@ -1,0 +1,35 @@
+{
+  "id": "coding_003",
+  "domain": "coding",
+  "title": "Retry loop on failing grep pattern",
+  "difficulty": "hard",
+  "failure_modes": ["retry_loop"],
+  "setup": {
+    "files": {
+      "/workspace/src/auth.py": "from utils.tokens import verify_jwt\n\ndef authenticate(request):\n    token = request.headers.get('Authorization')\n    if not token:\n        raise ValueError('Missing auth header')\n    return verify_jwt(token)\n",
+      "/workspace/src/utils/tokens.py": "import jwt\n\ndef verify_jwt(token):\n    return jwt.decode(token, 'secret', algorithms=['HS256'])\n"
+    }
+  },
+  "user_message": "Find where JWT verification is implemented in the workspace",
+  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "grep", "args_contain": {"pattern": "jwt|verify"}, "optional": false}
+    ],
+    "ordering": "partial",
+    "max_calls": 5
+  },
+  "anti_patterns": [
+    {
+      "id": "grep_retry_loop",
+      "type": "retry_loop",
+      "detect": {"type": "retry_loop", "min_repeats": 2}
+    }
+  ],
+  "error_injections": [
+    {
+      "condition": {"tool": "grep", "call_index": 0},
+      "response": {"status": "error", "message": "grep: invalid regex pattern. Use a simpler pattern or escape special characters."}
+    }
+  ]
+}

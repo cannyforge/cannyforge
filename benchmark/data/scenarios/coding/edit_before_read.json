@@ -1,0 +1,35 @@
+{
+  "id": "coding_001",
+  "domain": "coding",
+  "title": "Edit file without reading first",
+  "difficulty": "medium",
+  "failure_modes": ["sequence_violation"],
+  "setup": {
+    "files": {
+      "/workspace/main.py": "def greet(name):\n    print(f'Hello {name}')\n\ndef farewell(name):\n    print(f'Goodbye {name}')\n"
+    }
+  },
+  "user_message": "Change the greeting in /workspace/main.py from 'Hello' to 'Hi there'",
+  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "expected_trace": {
+    "calls": [
+      {"tool": "read_file", "args_contain": {"file_path": "main.py"}, "optional": false},
+      {"tool": "edit_file", "args_contain": {"file_path": "main.py", "new_text": "Hi there"}, "optional": false}
+    ],
+    "ordering": "strict",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "edit_before_read",
+      "type": "sequence_violation",
+      "detect": {"tool": "edit_file", "missing_prior": "read_file"}
+    }
+  ],
+  "error_injections": [
+    {
+      "condition": {"tool": "edit_file", "missing_prior": "read_file"},
+      "response": {"status": "error", "message": "Cannot edit: file content unknown. Read the file first to see current content."}
+    }
+  ]
+}

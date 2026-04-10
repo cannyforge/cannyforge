@@ -26,6 +26,14 @@ class Correction:
     created_at: float
     times_injected: int = 0
     times_effective: int = 0
+    correction_type: str = ""  # e.g. "sequence", "retry", "hallucination", "tool_selection"
+
+    @property
+    def effectiveness(self) -> float:
+        """Fraction of injections that were effective. -1.0 if never injected."""
+        if self.times_injected == 0:
+            return -1.0
+        return self.times_effective / self.times_injected
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +45,7 @@ class Correction:
             "created_at": self.created_at,
             "times_injected": self.times_injected,
             "times_effective": self.times_effective,
+            "correction_type": self.correction_type,
         }
 
     @classmethod
@@ -50,6 +59,7 @@ class Correction:
             created_at=float(data.get("created_at", time())),
             times_injected=int(data.get("times_injected", 0)),
             times_effective=int(data.get("times_effective", 0)),
+            correction_type=data.get("correction_type", ""),
         )
 
 
@@ -62,6 +72,16 @@ class CorrectionGenerator:
         "about", "into", "by", "up", "latest", "all", "last", "what", "how",
         "please", "me", "my", "your", "our", "their", "get", "find", "look",
         "show", "create", "write", "run", "execute", "generate", "task",
+    }
+
+    # Map error_type (from learning engine) → correction_type bucket for injection grouping
+    _ERROR_TYPE_MAP: Dict[str, str] = {
+        "SequenceViolationError": "sequence",
+        "RetryLoopError": "retry",
+        "HallucinatedToolError": "hallucination",
+        "ContextMissError": "context",
+        "WrongToolError": "tool_selection",
+        "FormatError": "arg_format",
     }
 
     def __init__(self, llm_provider=None):
@@ -93,6 +113,7 @@ class CorrectionGenerator:
             content=content,
             source_errors=self._source_error_ids(error_list),
             created_at=time(),
+            correction_type=self._ERROR_TYPE_MAP.get(error_type, "general"),
         )
 
     def _source_error_ids(self, errors: List[Any]) -> List[str]:
