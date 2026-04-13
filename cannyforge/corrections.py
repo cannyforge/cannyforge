@@ -82,6 +82,7 @@ class CorrectionGenerator:
         "ContextMissError": "context",
         "WrongToolError": "tool_selection",
         "FormatError": "arg_format",
+        "PrematureExitError": "sequence",   # treat as a sequence issue: missing step
     }
 
     def __init__(self, llm_provider=None):
@@ -91,20 +92,28 @@ class CorrectionGenerator:
                  skill_name: str,
                  error_type: str,
                  errors: Iterable[Any],
+                 failures: Optional[Iterable[Any]] = None,
                  llm_provider=None) -> Optional[Correction]:
         """Generate one correction from a cluster of similar errors."""
         error_list = list(errors)
-        if not error_list:
+        failure_list = list(failures or [])
+        if not error_list and not failure_list:
             return None
 
         provider = llm_provider or self._llm
         content = ""
 
         if provider:
-            content = self._generate_with_llm(skill_name, error_type, error_list, provider)
+            content = self._generate_with_llm(
+                skill_name,
+                error_type,
+                error_list,
+                failure_list,
+                provider,
+            )
 
         if not content:
-            content = self._generate_template(error_type, error_list)
+            content = self._generate_template(error_type, error_list, failure_list)
 
         return Correction(
             id=f"corr_{error_type.lower()}_{uuid.uuid4().hex[:10]}",
@@ -133,6 +142,14 @@ class CorrectionGenerator:
         return ids
 
     def _extract_confusion_pair(self, error: Any) -> Optional[Tuple[str, str]]:
+        expected_block = getattr(error, "expected", None)
+        actual_block = getattr(error, "actual", None)
+        if isinstance(expected_block, dict) and isinstance(actual_block, dict):
+            actual = actual_block.get("tool") or actual_block.get("selected_tool")
+            expected = expected_block.get("tool") or expected_block.get("expected_tool")
+            if actual and expected:
+                return str(actual), str(expected)
+
         message = str(getattr(error, "error_message", "") or "")
         context = getattr(error, "context_snapshot", {}) or {}
         context_block = context.get("context", {}) if isinstance(context, dict) else {}
@@ -163,6 +180,15 @@ class CorrectionGenerator:
             return None
         return str(actual), str(expected)
 
+    def _expected_tools_from_failures(self, failures: List[Any]) -> List[str]:
+        expected_tools = []
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            tool_name = expected.get("tool")
+            if tool_name and tool_name not in expected_tools:
+                expected_tools.append(str(tool_name))
+        return expected_tools
+
     def _tokenize(self, text: str) -> List[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", text.lower())
         return [t for t in tokens if len(t) > 2 and t not in self._STOPWORDS]
@@ -182,9 +208,14 @@ class CorrectionGenerator:
         common.sort(key=lambda tok: counts[tok], reverse=True)
         return common[:max_count]
 
-    def _generate_template(self, error_type: str, errors: List[Any]) -> str:
+    def _generate_template(self,
+                           error_type: str,
+                           errors: List[Any],
+                           failures: Optional[List[Any]] = None) -> str:
+        failure_list = failures or []
+        examples = failure_list or errors
         groups: Dict[Tuple[str, str], List[str]] = {}
-        for err in errors:
+        for err in examples:
             pair = self._extract_confusion_pair(err)
             if not pair:
                 continue
@@ -202,9 +233,25 @@ class CorrectionGenerator:
                 lines.append(line)
             return "\n".join(lines[:3])
 
-        tasks = [getattr(e, "task_description", "") for e in errors if getattr(e, "task_description", "")]
+        tasks = [getattr(e, "task_description", "") for e in examples if getattr(e, "task_description", "")]
         keywords = self._common_keywords(tasks)
         phrase = ", ".join(keywords) if keywords else "similar requests"
+
+        if error_type == "PrematureExitError":
+            expected_tools = self._expected_tools_from_failures(failure_list)
+            if not expected_tools:
+                for err in errors:
+                    ctx = (getattr(err, "context_snapshot", {}) or {})
+                    et = ctx.get("expected_tool") or ctx.get("context", {}).get("expected_tool")
+                    if et and et not in expected_tools:
+                        expected_tools.append(et)
+            tool_list = ", ".join(f"`{t}`" for t in expected_tools[:3])
+            suffix = f" Complete all required steps including {tool_list}." if tool_list else ""
+            return (
+                f"Do not stop after the first tool call when the task requires multiple steps.{suffix} "
+                f"Continue until the full task is resolved."
+            )
+
         return (
             f"For {error_type}, slow down and verify the intent before acting. "
             f"If the task involves {phrase}, choose the tool and parameters that best match the requested action."
@@ -214,6 +261,7 @@ class CorrectionGenerator:
                            skill_name: str,
                            error_type: str,
                            errors: List[Any],
+                           failures: List[Any],
                            llm_provider) -> str:
         """Best-effort LLM synthesis. Falls back silently on any failure."""
         try:
@@ -225,6 +273,16 @@ class CorrectionGenerator:
                     "error": getattr(err, "error_message", ""),
                     "context": getattr(err, "context_snapshot", {}),
                 })
+            failure_examples = []
+            for failure in failures[:8]:
+                failure_examples.append({
+                    "task": getattr(failure, "task_description", ""),
+                    "failure_class": getattr(failure, "failure_class", ""),
+                    "phase": getattr(failure, "phase", ""),
+                    "expected": getattr(failure, "expected", {}),
+                    "actual": getattr(failure, "actual", {}),
+                    "evidence": getattr(failure, "evidence", {}),
+                })
 
             prompt = (
                 "Given these repeated execution mistakes, write one concise correction rule "
@@ -232,7 +290,8 @@ class CorrectionGenerator:
                 "specific, and under 80 words. Return plain text only.\n\n"
                 f"Skill: {skill_name}\n"
                 f"Error type: {error_type}\n"
-                f"Examples: {json.dumps(examples, ensure_ascii=False)}"
+                f"Error examples: {json.dumps(examples, ensure_ascii=False)}\n"
+                f"Failure examples: {json.dumps(failure_examples, ensure_ascii=False)}"
             )
 
             request = LLMRequest(

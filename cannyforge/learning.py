@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import random
 
+from cannyforge.failures import FailureRecord
 from cannyforge.knowledge import KnowledgeBase, Rule, RuleGenerator, RuleType, RuleStatus
 from cannyforge.corrections import CorrectionGenerator
 
@@ -159,6 +160,74 @@ class ErrorRepository:
             self._backend.clear_errors()
         elif self.errors_file.exists():
             self.errors_file.unlink()
+
+
+class FailureRepository:
+    """Repository for normalized failure records.
+
+    Uses dedicated backend methods when available. If the backend predates
+    FailureRecord support, falls back to local JSONL persistence so callers do
+    not need an all-or-nothing storage migration.
+    """
+
+    def __init__(self, data_dir: Path, storage_backend=None):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._backend = storage_backend
+        self.failures_file = self.data_dir / "failures.jsonl"
+        self.failures: List[FailureRecord] = []
+        self._load()
+
+    def _load(self):
+        if self._backend is not None and hasattr(self._backend, "get_failures"):
+            try:
+                for data in self._backend.get_failures():
+                    self.failures.append(FailureRecord.from_dict(data))
+                return
+            except Exception as e:
+                logger.error(f"Error loading failures from backend: {e}")
+
+        if self.failures_file.exists():
+            try:
+                with open(self.failures_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            self.failures.append(FailureRecord.from_dict(json.loads(line)))
+            except Exception as e:
+                logger.error(f"Error loading failures: {e}")
+
+    def record(self, failure: FailureRecord):
+        self.failures.append(failure)
+        if self._backend is not None and hasattr(self._backend, "store_failure"):
+            try:
+                self._backend.store_failure(failure.to_dict())
+                return
+            except Exception as e:
+                logger.error(f"Error writing failure via backend: {e}")
+
+        try:
+            with open(self.failures_file, 'a') as f:
+                f.write(json.dumps(failure.to_dict()) + '\n')
+        except Exception as e:
+            logger.error(f"Error writing failure record: {e}")
+
+    def get_by_skill(self, skill_name: str) -> List[FailureRecord]:
+        return [f for f in self.failures if f.skill_name == skill_name]
+
+    def get_by_class(self, failure_class: str) -> List[FailureRecord]:
+        return [f for f in self.failures if f.failure_class == failure_class]
+
+    def clear(self):
+        self.failures = []
+        if self._backend is not None and hasattr(self._backend, "clear_failures"):
+            try:
+                self._backend.clear_failures()
+                return
+            except Exception as e:
+                logger.error(f"Error clearing failures via backend: {e}")
+
+        if self.failures_file.exists():
+            self.failures_file.unlink()
 
 
 @dataclass
@@ -478,6 +547,7 @@ class LearningEngine:
         self.data_dir = Path(data_dir)
 
         self.error_repo = ErrorRepository(data_dir, storage_backend=storage_backend)
+        self.failure_repo = FailureRepository(data_dir, storage_backend=storage_backend)
         self.step_error_repo = StepErrorRepository(data_dir, storage_backend=storage_backend)
         self.success_repo = SuccessRepository(data_dir, storage_backend=storage_backend)
         self.pattern_detector = PatternDetector()
@@ -506,6 +576,37 @@ class LearningEngine:
         )
         self.error_repo.record(record)
         logger.debug(f"Recorded error: {error_type} for {skill_name}")
+
+    def record_failure(self,
+                       skill_name: str,
+                       task_description: str,
+                       failure_class: str,
+                       phase: str,
+                       severity: str = "medium",
+                       expected: Optional[Dict[str, Any]] = None,
+                       actual: Optional[Dict[str, Any]] = None,
+                       evidence: Optional[Dict[str, Any]] = None,
+                       trace_context: Optional[Dict[str, Any]] = None,
+                       scenario_id: str = "",
+                       legacy_error_type: Optional[str] = None) -> FailureRecord:
+        """Record a normalized failure fact without forcing downstream migrations."""
+        record = FailureRecord(
+            timestamp=datetime.now(),
+            skill_name=skill_name,
+            task_description=task_description,
+            failure_class=failure_class,
+            phase=phase,
+            severity=severity,
+            expected=expected or {},
+            actual=actual or {},
+            evidence=evidence or {},
+            trace_context=trace_context or {},
+            scenario_id=scenario_id,
+            legacy_error_type=legacy_error_type,
+        )
+        self.failure_repo.record(record)
+        logger.debug(f"Recorded failure: {failure_class} for {skill_name}")
+        return record
 
     def record_success(self,
                       skill_name: str,
@@ -573,23 +674,30 @@ class LearningEngine:
         for error in self.error_repo.errors:
             errors_by_skill[error.skill_name].append(error)
 
+        failures_by_skill = defaultdict(list)
+        for failure in self.failure_repo.failures:
+            failures_by_skill[failure.skill_name].append(failure)
+
         metrics.errors_analyzed = len(self.error_repo.errors)
 
         # Track unclassified errors for pattern suggestion
         unclassified_errors: List[ErrorRecord] = []
 
         # Detect patterns for each skill
-        for skill_name, errors in errors_by_skill.items():
-            if not errors:
-                continue
+        for skill_name in sorted(set(errors_by_skill) | set(failures_by_skill)):
+            errors = errors_by_skill.get(skill_name, [])
+            skill_failures = failures_by_skill.get(skill_name, [])
 
-            # Update detector thresholds
-            self.pattern_detector.min_frequency = min_frequency
-            self.pattern_detector.min_confidence = min_confidence
+            if errors:
+                # Update detector thresholds
+                self.pattern_detector.min_frequency = min_frequency
+                self.pattern_detector.min_confidence = min_confidence
 
-            # Detect patterns
-            patterns = self.pattern_detector.detect_patterns(errors)
-            metrics.patterns_detected += len(patterns)
+                # Detect patterns
+                patterns = self.pattern_detector.detect_patterns(errors)
+                metrics.patterns_detected += len(patterns)
+            else:
+                patterns = []
 
             # Collect error types that got patterns
             patterned_types = {p[0] for p in patterns}
@@ -620,10 +728,15 @@ class LearningEngine:
 
                 # Always generate correction text for LangGraph-facing injection.
                 type_errors = [e for e in errors if e.error_type == error_type]
+                type_failures = [
+                    failure for failure in skill_failures
+                    if failure.error_type == error_type
+                ]
                 correction = self.correction_generator.generate(
                     skill_name=skill_name,
                     error_type=error_type,
                     errors=type_errors,
+                    failures=type_failures,
                     llm_provider=llm_provider,
                 )
                 if correction:
@@ -637,6 +750,37 @@ class LearningEngine:
                             skill_name,
                             error_type,
                         )
+
+            # Generate corrections from normalized failures even when the
+            # corresponding legacy errors were not stored.
+            failure_types = defaultdict(list)
+            for failure in skill_failures:
+                failure_types[failure.error_type].append(failure)
+
+            for error_type, type_failures in failure_types.items():
+                if error_type in patterned_types or len(type_failures) < min_frequency:
+                    continue
+
+                correction = self.correction_generator.generate(
+                    skill_name=skill_name,
+                    error_type=error_type,
+                    errors=[],
+                    failures=type_failures,
+                    llm_provider=llm_provider,
+                )
+                if not correction:
+                    continue
+
+                before_count = len(self.knowledge_base.get_corrections(skill_name))
+                self.knowledge_base.add_correction(skill_name, correction)
+                after_count = len(self.knowledge_base.get_corrections(skill_name))
+                if after_count > before_count:
+                    metrics.corrections_generated += 1
+                    logger.info(
+                        "Generated failure-backed correction for %s/%s",
+                        skill_name,
+                        error_type,
+                    )
 
             # Collect unclassified errors for pattern suggestion
             for e in errors:
@@ -725,6 +869,7 @@ class LearningEngine:
 
         return {
             'total_errors': len(self.error_repo.errors),
+            'total_failures': len(self.failure_repo.failures),
             'total_successes': len(self.success_repo.successes),
             'learning_cycles': self.learning_cycles,
             'total_rules': kb_stats['total_rules'],
@@ -737,6 +882,7 @@ class LearningEngine:
     def clear_data(self):
         """Clear all learning data (for testing)"""
         self.error_repo.clear()
+        self.failure_repo.clear()
         self.step_error_repo.clear()
         self.success_repo.clear()
         self.learning_cycles = 0

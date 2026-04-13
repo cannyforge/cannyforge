@@ -8,6 +8,7 @@ from cannyforge.learning import (
     LearningEngine, PatternDetector, ErrorRepository, SuccessRepository,
     ErrorRecord, StepErrorRecord, StepErrorRepository,
 )
+from cannyforge.failures import FailureRecord
 from cannyforge.knowledge import KnowledgeBase, RuleGenerator, RuleType
 
 
@@ -113,6 +114,24 @@ class TestLearningEngine:
         stats = engine.get_statistics()
         assert stats["total_successes"] > 0
 
+    def test_record_failure(self, knowledge_base, tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+        record = engine.record_failure(
+            skill_name="tool_use_fsi",
+            task_description="review, validate, then trade",
+            failure_class="SequenceViolation",
+            phase="sequence",
+            severity="high",
+            expected={"tool": "execute_trade", "step": 3},
+            actual={"tool": "execute_trade", "step": 2},
+            evidence={"ordering": "strict"},
+            scenario_id="C01",
+            legacy_error_type="SequenceViolationError",
+        )
+        assert isinstance(record, FailureRecord)
+        assert len(engine.failure_repo.failures) == 1
+        assert engine.failure_repo.failures[0].failure_class == "SequenceViolation"
+
     def test_learning_cycle_generates_rules(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
 
@@ -138,6 +157,37 @@ class TestLearningEngine:
         corrections = knowledge_base.get_corrections("email_writer")
         assert len(corrections) >= 1
 
+    def test_learning_cycle_uses_failure_context_in_corrections(self, knowledge_base,
+                                                                tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(3):
+            engine.record_error(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                error_type="PrematureExitError",
+                error_message="Stopped before execute_trade",
+                context_snapshot={"context": {"requires_prior_context": True}},
+                rules_applied=[],
+            )
+            engine.record_failure(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                failure_class="PrematureExit",
+                phase="completion",
+                expected={"tool": "execute_trade", "step": 3},
+                actual={"called_tools": ["fetch_client_portfolio", "run_compliance_check"]},
+                evidence={"missing_step": 3},
+                legacy_error_type="PrematureExitError",
+            )
+
+        metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
+        assert metrics.corrections_generated >= 1
+
+        corrections = knowledge_base.get_corrections("tool_use_fsi")
+        assert len(corrections) >= 1
+        assert any("execute_trade" in correction.content for correction in corrections)
+
     def test_clear_data(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
         engine.record_error(
@@ -145,9 +195,14 @@ class TestLearningEngine:
             error_type="E", error_message="m",
             context_snapshot={}, rules_applied=[],
         )
+        engine.record_failure(
+            skill_name="s", task_description="t",
+            failure_class="WrongTool", phase="selection",
+        )
         engine.clear_data()
         stats = engine.get_statistics()
         assert stats["total_errors"] == 0
+        assert stats["total_failures"] == 0
 
 
 class TestStepErrorRepository:

@@ -107,7 +107,8 @@ class TestCannyForgeMiddleware:
         assert "[CANNYFORGE]" in content
         assert "search_web" in content
 
-    def test_after_model_marks_correction_effective(self, middleware, forge):
+    def test_finalize_task_marks_correction_effective(self, middleware, forge):
+        """finalize_task(True) records correction as effective (task-level signal)."""
         correction = Correction(
             id="corr_effective",
             skill_name="tool_use",
@@ -120,12 +121,18 @@ class TestCannyForgeMiddleware:
 
         middleware.before_model({"messages": [{"content": "test request"}]})
         middleware.after_model({"messages": [{"content": "normal output"}]})
+        # after_model no longer tracks correction effectiveness; finalize_task does
+        not_yet = forge.knowledge_base.get_corrections("tool_use")[0]
+        assert not_yet.times_injected == 1
+        assert not_yet.times_effective == 0   # not updated until finalize_task
 
+        middleware.finalize_task(True)
         saved = forge.knowledge_base.get_corrections("tool_use")[0]
         assert saved.times_injected == 1
         assert saved.times_effective == 1
 
-    def test_after_model_records_correction_failure_then_success(self, middleware, forge):
+    def test_finalize_task_records_correction_failure_then_success(self, middleware, forge):
+        """finalize_task uses ground-truth task outcome, not turn-level error detection."""
         correction = Correction(
             id="corr_failure",
             skill_name="tool_use",
@@ -140,6 +147,7 @@ class TestCannyForgeMiddleware:
         middleware.after_model({
             "messages": [{"type": "tool", "status": "error", "content": "WrongToolError: bad tool"}],
         })
+        middleware.finalize_task(False)   # task failed
 
         failed = forge.knowledge_base.get_corrections("tool_use")[0]
         assert failed.times_injected == 1
@@ -147,6 +155,7 @@ class TestCannyForgeMiddleware:
 
         middleware.before_model({"messages": [{"content": "test request"}]})
         middleware.after_model({"messages": [{"content": "normal output"}]})
+        middleware.finalize_task(True)    # task succeeded
 
         recovered = forge.knowledge_base.get_corrections("tool_use")[0]
         assert recovered.times_injected == 2

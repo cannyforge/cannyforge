@@ -2,12 +2,15 @@
 """Tests for benchmark/scenario_harness.py."""
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from benchmark.eval_trace import TraceEntry
 from benchmark.scenario_harness import MockToolRouter, RunResult, ScenarioHarness, ScenarioRunner
+from cannyforge.knowledge import KnowledgeBase
+from cannyforge.learning import LearningEngine
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +276,34 @@ class TestScenarioHarness:
         harness = ScenarioHarness(str(tmp_path))
         # metadata.json has no "expected_trace" key → should be ignored
         assert len(harness.scenarios) == 2
+
+    def test_trace_learning_records_normalized_failures(self, tmp_path):
+        self._write_scenarios(tmp_path)
+        harness = ScenarioHarness(str(tmp_path))
+        knowledge_base = KnowledgeBase(tmp_path / "learning")
+        engine = LearningEngine(knowledge_base, tmp_path / "learning")
+        forge = SimpleNamespace(
+            learning_engine=engine,
+            run_learning_cycle=lambda **kwargs: engine.run_learning_cycle(**kwargs),
+        )
+        result = RunResult(
+            scenario_id="test_edit_before_read",
+            condition="baseline",
+            score=ScenarioRunner(EDIT_BEFORE_READ_SCENARIO).run(
+                [("edit_file", {"file_path": "main.py"})],
+                condition="baseline",
+            ).score,
+            trace=[TraceEntry(
+                tool="edit_file",
+                args={"file_path": "main.py"},
+                result={"status": "error", "message": "Read the file first"},
+                status="error",
+            )],
+        )
+
+        harness._learn_from_trace_failures(forge, [result], skill_name="tool_use")
+
+        assert len(engine.failure_repo.failures) >= 1
+        failure = engine.failure_repo.failures[0]
+        assert failure.failure_class in {"WrongTool", "PrematureExit", "SequenceViolation"}
+        assert failure.scenario_id == "test_edit_before_read"

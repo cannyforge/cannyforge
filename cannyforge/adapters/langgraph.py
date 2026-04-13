@@ -250,15 +250,25 @@ class CannyForgeMiddleware:
         self._rules_applied = []
         self._corrections_injected = []
 
-        # Always-on corrections (LangGraph correction path)
-        corrections = self._forge.knowledge_base.get_corrections(self._skill_name)
+        # Always-on corrections (LangGraph correction path).
+        # Pull from the base skill AND any domain sub-skills (e.g. tool_use_data)
+        # so that corrections learned per-domain are injected when relevant.
+        all_skill_names = [self._skill_name]
+        all_skill_names += [
+            sk for sk in self._forge.knowledge_base.list_skills()
+            if sk.startswith(self._skill_name + "_")
+        ]
+        raw_corrections: List = []
+        for sk in all_skill_names:
+            raw_corrections.extend(self._forge.knowledge_base.get_corrections(sk))
+
         now = time()
         corrections = [
-            correction for correction in corrections
+            c for c in raw_corrections
             if not (
-                correction.times_injected >= MIN_INJECTIONS_FOR_DEPRECATION
-                and correction.effectiveness < MIN_EFFECTIVENESS_TO_KEEP
-                and (now - correction.created_at) > STALE_DAYS * 86400
+                c.times_injected >= MIN_INJECTIONS_FOR_DEPRECATION
+                and c.effectiveness < MIN_EFFECTIVENESS_TO_KEEP
+                and (now - c.created_at) > STALE_DAYS * 86400
             )
         ]
 
@@ -291,6 +301,19 @@ class CannyForgeMiddleware:
         rule_suggestions = rule_ctx.get("suggestions", [])
 
         messages = list(state_dict.get("messages", []))
+
+        # First-turn guard: only inject on turn 1 or immediately after a tool error.
+        # On clean intermediate turns (model is mid-task, no error) skip injection so
+        # the correction text doesn't accumulate across ReAct steps.
+        ai_turns = sum(1 for m in messages if self._get_message_type(m) == "ai")
+        if ai_turns > 0:
+            last_turn_had_error = any(
+                self._extract_error(m)
+                for m in messages[-4:]  # check recent messages for tool errors
+            )
+            if not last_turn_had_error:
+                # Clean intermediate turn — skip injection, still return state
+                return {"messages": messages}
 
         # Build structured injection: group corrections by correction_type, then append rule warnings
         correction_sections: Dict[str, List[str]] = {}
@@ -394,27 +417,40 @@ class CannyForgeMiddleware:
                 for rule_id in self._rules_applied:
                     self._forge.knowledge_base.record_rule_outcome(rule_id, False)
 
-        if found_error and self._corrections_injected:
-            for correction_id in self._corrections_injected:
-                self._forge.knowledge_base.record_correction_outcome(
-                    correction_id, False
-                )
-            self._forge.knowledge_base.save_corrections()
-
-        if not found_error:
-            # Record success for applied rules
+        # Rule outcomes are tracked at the turn level (error = rule failed this turn)
+        if found_error:
+            for rule_id in self._rules_applied:
+                self._forge.knowledge_base.record_rule_outcome(rule_id, False)
+        else:
             for rule_id in self._rules_applied:
                 self._forge.knowledge_base.record_rule_outcome(rule_id, True)
 
-            # Corrections that were injected and did not recur are considered effective
-            if self._corrections_injected:
-                for correction_id in self._corrections_injected:
-                    self._forge.knowledge_base.record_correction_outcome(
-                        correction_id, True
-                    )
-                self._forge.knowledge_base.save_corrections()
-
+        # Correction effectiveness is NOT tracked here — use finalize_task() after
+        # the full task completes so the signal is task outcome, not turn outcome.
         return state
+
+    def finalize_task(self, success: bool) -> None:
+        """Record correction effectiveness using the ground-truth task outcome.
+
+        Call this once after the agent run completes (i.e., after agent.invoke())
+        with the result of scenario.check_success() or equivalent.  This gives
+        a far more accurate signal than the per-turn heuristic in after_model.
+
+        If this is never called (e.g., in production use outside the harness),
+        correction effectiveness goes untracked — corrections are still injected
+        but won't be auto-deprecated.  Call this whenever a task-level outcome
+        is available.
+        """
+        injected = list(self._corrections_injected)
+        if not injected:
+            return
+        for correction_id in injected:
+            self._forge.knowledge_base.record_correction_outcome(correction_id, success)
+        self._forge.knowledge_base.save_corrections()
+        logger.debug(
+            "finalize_task(success=%s) — recorded outcome for %d corrections: %s",
+            success, len(injected), injected,
+        )
 
     def _extract_error(self, msg: Any) -> Optional[str]:
         """Extract error content from a message, if it represents an error."""

@@ -514,6 +514,10 @@ class KnowledgeBase:
         self.correction_index[correction.id] = correction
         logger.info("Added correction '%s' for skill '%s'", correction.id, skill_name)
 
+    def list_skills(self) -> List[str]:
+        """Return all skill names that have at least one correction."""
+        return list(self.corrections_by_skill.keys())
+
     def get_corrections(self, skill_name: str) -> List[Correction]:
         """Get all corrections for a skill."""
         return list(self.corrections_by_skill.get(skill_name, []))
