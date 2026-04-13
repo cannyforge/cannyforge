@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from cannyforge.corrections import CorrectionGenerator, Correction
+from cannyforge.failures import FailureRecord
 from cannyforge.learning import ErrorRecord
 from cannyforge.knowledge import KnowledgeBase
 
@@ -69,6 +70,54 @@ class TestCorrectionGenerator:
 
         assert correction is not None
         assert "GenericError" in correction.content
+
+    def test_failure_backed_completion_correction_uses_family_bucket(self):
+        gen = CorrectionGenerator()
+        failure = FailureRecord(
+            timestamp=datetime.now(),
+            skill_name="tool_use",
+            task_description="review account then trade",
+            failure_class="PrematureExit",
+            phase="completion",
+            expected={"tool": "execute_trade", "step": 3},
+            actual={"called_tools": ["fetch_client_portfolio"]},
+            evidence={"missing_step": 3},
+        )
+
+        correction = gen.generate(
+            "tool_use",
+            failure.error_type,
+            [],
+            failures=[failure],
+        )
+
+        assert correction is not None
+        assert correction.correction_type == "completion"
+        assert "execute_trade" in correction.content
+
+    def test_failure_backed_prerequisite_correction_uses_family_bucket(self):
+        gen = CorrectionGenerator()
+        failure = FailureRecord(
+            timestamp=datetime.now(),
+            skill_name="tool_use",
+            task_description="fetch file then edit it",
+            failure_class="ContextMiss",
+            phase="context",
+            expected={"tool": "read_file", "step": 1},
+            actual={"tool": "edit_file", "step": 1},
+            evidence={"missing_context": True},
+        )
+
+        correction = gen.generate(
+            "tool_use",
+            failure.error_type,
+            [],
+            failures=[failure],
+        )
+
+        assert correction is not None
+        assert correction.correction_type == "prerequisite"
+        assert "prior context" in correction.content.lower()
 
 
 class TestCorrectionKnowledge:

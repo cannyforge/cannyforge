@@ -321,12 +321,26 @@ class CannyForgeMiddleware:
             bucket = c.correction_type or "general"
             correction_sections.setdefault(bucket, []).append(c.content)
 
-        section_order = ["sequence", "retry", "hallucination", "tool_selection", "general"]
+        section_order = [
+            "sequence",
+            "completion",
+            "prerequisite",
+            "retry",
+            "hallucination",
+            "tool_selection",
+            "arg_format",
+            "context",
+            "general",
+        ]
         section_labels = {
             "sequence": "Sequence rules",
+            "completion": "Completion rules",
+            "prerequisite": "Prerequisite rules",
             "retry": "Retry / recovery rules",
             "hallucination": "Tool existence rules",
             "tool_selection": "Tool selection rules",
+            "arg_format": "Argument / schema rules",
+            "context": "Context rules",
             "general": "Learned corrections",
         }
 

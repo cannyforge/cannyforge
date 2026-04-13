@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from time import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from cannyforge.failures import get_failure_definition
+
 logger = logging.getLogger("Corrections")
 
 
@@ -120,10 +122,22 @@ class CorrectionGenerator:
             skill_name=skill_name,
             error_type=error_type,
             content=content,
-            source_errors=self._source_error_ids(error_list),
+            source_errors=self._source_error_ids(error_list or failure_list),
             created_at=time(),
-            correction_type=self._ERROR_TYPE_MAP.get(error_type, "general"),
+            correction_type=self._resolve_correction_type(error_type, failure_list),
         )
+
+    def _resolve_correction_type(self,
+                                 error_type: str,
+                                 failures: List[Any]) -> str:
+        if failures:
+            family = getattr(failures[0], "intervention_family", "")
+            if family:
+                return str(family)
+            failure_class = getattr(failures[0], "failure_class", "")
+            if failure_class:
+                return get_failure_definition(str(failure_class)).intervention_family
+        return self._ERROR_TYPE_MAP.get(error_type, "general")
 
     def _source_error_ids(self, errors: List[Any]) -> List[str]:
         ids = []
@@ -214,6 +228,37 @@ class CorrectionGenerator:
                            failures: Optional[List[Any]] = None) -> str:
         failure_list = failures or []
         examples = failure_list or errors
+        family = self._resolve_correction_type(error_type, failure_list)
+
+        if family == "prerequisite":
+            return (
+                "Retrieve and carry forward the required prior context before using dependent tools. "
+                "Do not continue until the upstream read, fetch, or validation step has completed."
+            )
+
+        if family == "sequence":
+            return (
+                "Execute the required steps in order. Complete prerequisite actions before any dependent tool call, "
+                "and do not skip ahead in the workflow."
+            )
+
+        if family == "retry":
+            return (
+                "Do not repeat the same failing tool call unchanged. Modify the arguments, choose a different tool, "
+                "or surface the blocker before retrying."
+            )
+
+        if family == "hallucination":
+            return (
+                "Only call tools that are explicitly available in the current tool list. If no listed tool fits, "
+                "say so instead of inventing one."
+            )
+
+        if family == "arg_format":
+            return (
+                "Validate required parameters, types, and output shape against the tool schema before calling the tool."
+            )
+
         groups: Dict[Tuple[str, str], List[str]] = {}
         for err in examples:
             pair = self._extract_confusion_pair(err)
@@ -237,7 +282,7 @@ class CorrectionGenerator:
         keywords = self._common_keywords(tasks)
         phrase = ", ".join(keywords) if keywords else "similar requests"
 
-        if error_type == "PrematureExitError":
+        if family == "completion":
             expected_tools = self._expected_tools_from_failures(failure_list)
             if not expected_tools:
                 for err in errors:

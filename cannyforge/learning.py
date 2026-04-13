@@ -758,7 +758,58 @@ class LearningEngine:
                 failure_types[failure.error_type].append(failure)
 
             for error_type, type_failures in failure_types.items():
-                if error_type in patterned_types or len(type_failures) < min_frequency:
+                frequency = len(type_failures)
+                if frequency < min_frequency:
+                    continue
+
+                confidence = frequency / len(skill_failures) if skill_failures else 0.0
+
+                if error_type not in patterned_types:
+                    metrics.patterns_detected += 1
+
+                    existing_rules = self.knowledge_base.get_rules(skill_name)
+                    already_has_rule = any(
+                        r.source_error_type == error_type
+                        and r.status != RuleStatus.DORMANT
+                        for r in existing_rules
+                    )
+
+                    if not already_has_rule:
+                        rule = self.rule_generator.generate_rule_from_error(
+                            error_type, frequency, confidence
+                        )
+                        if rule:
+                            self.knowledge_base.add_rule(skill_name, rule)
+                            metrics.rules_generated += 1
+                            self.total_rules_generated += 1
+                            logger.info(
+                                "Generated failure-backed rule for %s/%s",
+                                skill_name,
+                                error_type,
+                            )
+
+                existing_rules = self.knowledge_base.get_rules(skill_name)
+                already_has_recovery = any(
+                    r.source_error_type == error_type
+                    and r.rule_type == RuleType.RECOVERY
+                    and r.status != RuleStatus.DORMANT
+                    for r in existing_rules
+                )
+                if not already_has_recovery:
+                    rule = self.rule_generator.generate_recovery_rule_from_error(
+                        error_type, frequency, confidence,
+                    )
+                    if rule:
+                        self.knowledge_base.add_rule(skill_name, rule)
+                        metrics.rules_generated += 1
+                        self.total_rules_generated += 1
+                        logger.info(
+                            "Generated failure-backed recovery rule for %s/%s",
+                            skill_name,
+                            error_type,
+                        )
+
+                if error_type in patterned_types:
                     continue
 
                 correction = self.correction_generator.generate(

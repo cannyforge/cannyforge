@@ -188,6 +188,29 @@ class TestLearningEngine:
         assert len(corrections) >= 1
         assert any("execute_trade" in correction.content for correction in corrections)
 
+    def test_learning_cycle_generates_rules_from_failures(self, knowledge_base,
+                                                          tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(3):
+            engine.record_failure(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                failure_class="SequenceViolation",
+                phase="sequence",
+                expected={"tool": "execute_trade", "step": 3},
+                actual={"tool": "execute_trade", "step": 2},
+                evidence={"ordering": "strict"},
+                legacy_error_type="SequenceViolationError",
+            )
+
+        metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
+        assert metrics.rules_generated >= 1
+
+        rules = knowledge_base.get_rules("tool_use_fsi")
+        assert any(rule.source_error_type == "SequenceViolationError" for rule in rules)
+        assert any(rule.rule_type == RuleType.RECOVERY for rule in rules)
+
     def test_clear_data(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
         engine.record_error(

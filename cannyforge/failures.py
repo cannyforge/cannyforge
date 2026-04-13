@@ -8,14 +8,66 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 
+@dataclass(frozen=True)
+class FailureDefinition:
+    legacy_error_type: str
+    intervention_family: str
+    default_phase: str
+
+
+FAILURE_CATALOG: Dict[str, FailureDefinition] = {
+    "WrongTool": FailureDefinition(
+        legacy_error_type="WrongToolError",
+        intervention_family="tool_selection",
+        default_phase="selection",
+    ),
+    "ArgumentMismatch": FailureDefinition(
+        legacy_error_type="FormatError",
+        intervention_family="arg_format",
+        default_phase="args",
+    ),
+    "PrematureExit": FailureDefinition(
+        legacy_error_type="PrematureExitError",
+        intervention_family="completion",
+        default_phase="completion",
+    ),
+    "SequenceViolation": FailureDefinition(
+        legacy_error_type="SequenceViolationError",
+        intervention_family="sequence",
+        default_phase="sequence",
+    ),
+    "RetryLoop": FailureDefinition(
+        legacy_error_type="RetryLoopError",
+        intervention_family="retry",
+        default_phase="recovery",
+    ),
+    "HallucinatedTool": FailureDefinition(
+        legacy_error_type="HallucinatedToolError",
+        intervention_family="hallucination",
+        default_phase="selection",
+    ),
+    "ContextMiss": FailureDefinition(
+        legacy_error_type="ContextMissError",
+        intervention_family="prerequisite",
+        default_phase="context",
+    ),
+}
+
+
+def get_failure_definition(failure_class: str) -> FailureDefinition:
+    return FAILURE_CATALOG.get(
+        failure_class,
+        FailureDefinition(
+            legacy_error_type=f"{failure_class}Error",
+            intervention_family="general",
+            default_phase="general",
+        ),
+    )
+
+
 FAILURE_TO_LEGACY_ERROR: Dict[str, str] = {
-    "WrongTool": "WrongToolError",
-    "ArgumentMismatch": "FormatError",
-    "PrematureExit": "PrematureExitError",
-    "SequenceViolation": "SequenceViolationError",
-    "RetryLoop": "RetryLoopError",
-    "HallucinatedTool": "HallucinatedToolError",
-    "ContextMiss": "ContextMissError",
+    name: definition.legacy_error_type
+    for name, definition in FAILURE_CATALOG.items()
 }
 
 
@@ -48,6 +100,7 @@ class FailureRecord:
             "task": self.task_description,
             "failure_class": self.failure_class,
             "phase": self.phase,
+            "intervention_family": self.intervention_family,
             "severity": self.severity,
             "expected": self.expected,
             "actual": self.actual,
@@ -76,7 +129,9 @@ class FailureRecord:
 
     @property
     def error_type(self) -> str:
-        return self.legacy_error_type or FAILURE_TO_LEGACY_ERROR.get(
-            self.failure_class,
-            f"{self.failure_class}Error",
-        )
+        definition = get_failure_definition(self.failure_class)
+        return self.legacy_error_type or definition.legacy_error_type
+
+    @property
+    def intervention_family(self) -> str:
+        return get_failure_definition(self.failure_class).intervention_family
