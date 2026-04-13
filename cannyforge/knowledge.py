@@ -952,6 +952,24 @@ class RuleGenerator:
             ],
             'description': 'Detect when the agent calls a tool not in the available tool set'
         },
+        'PrematureExitError': {
+            'detection': [
+                Condition('context.requires_prior_context', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'premature_exit_risk'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously stopped before completing all required steps. '
+                       'This task requires multiple tool calls in sequence. '
+                       'Do not give a final answer until every required step has been executed.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Task ended early without completing all required tool calls. '
+                       'Continue calling the remaining tools until the full task is resolved.'),
+            ],
+            'description': 'Detect when the agent stops before completing all required tool calls'
+        },
     }
 
     _custom_patterns: Dict[str, Dict[str, Any]] = {}
