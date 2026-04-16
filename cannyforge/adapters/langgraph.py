@@ -23,6 +23,8 @@ import threading
 from time import time
 from typing import Any, Dict, List, Optional
 
+from cannyforge.failures import runtime_supports_error
+
 try:
     from langgraph.prebuilt.chat_agent_executor import AgentState
     LANGGRAPH_AVAILABLE = True
@@ -108,6 +110,7 @@ class CannyForgeMiddleware:
         messages = state_dict.get("messages", [])
         task_description = ""
         selected_tool = state_dict.get("selected_tool", "")
+        observed_signals = set()
 
         for msg in messages:
             msg_type = self._get_message_type(msg)
@@ -117,6 +120,8 @@ class CannyForgeMiddleware:
                     task_description = content
                     break  # Use the first human message
 
+        latest_tool_call: Dict[str, Any] = {}
+
         # Extract tool calls from the latest AI message for context enrichment
         for msg in reversed(messages):
             msg_type = self._get_message_type(msg)
@@ -124,23 +129,226 @@ class CannyForgeMiddleware:
                 tool_calls = self._get_tool_calls(msg)
                 if tool_calls and not selected_tool:
                     selected_tool = tool_calls[0].get("name", "")
+                    observed_signals.add("selected_tool")
+                if tool_calls:
+                    latest_tool_call = tool_calls[0]
                 break
+
+        if "selected_tool" in state_dict:
+            observed_signals.add("selected_tool")
+
+        attempted_tool = state_dict.get("attempted_tool", "") or latest_tool_call.get("name", "") or selected_tool
+        if attempted_tool:
+            observed_signals.add("attempted_tool")
+
+        completed_tools, failed_tools, last_failed_call_sig = self._derive_tool_history(messages)
+        if completed_tools:
+            observed_signals.add("completed_tools")
+        if failed_tools:
+            observed_signals.add("failed_tools")
+        if last_failed_call_sig:
+            observed_signals.add("last_failed_call_sig")
+
+        if "completed_tools" in state_dict:
+            completed_tools = list(state_dict.get("completed_tools", []) or [])
+            observed_signals.add("completed_tools")
+        if "failed_tools" in state_dict:
+            failed_tools = list(state_dict.get("failed_tools", []) or [])
+            observed_signals.add("failed_tools")
+        if "last_failed_call_sig" in state_dict:
+            last_failed_call_sig = str(state_dict.get("last_failed_call_sig", "") or "")
+            observed_signals.add("last_failed_call_sig")
+
+        current_call_sig = state_dict.get("current_call_sig", "") or self._normalize_call_signature(
+            attempted_tool,
+            latest_tool_call.get("args", latest_tool_call.get("arguments", {})),
+        )
+        if current_call_sig:
+            observed_signals.add("current_call_sig")
+
+        available_tools = self._normalize_tool_list(state_dict.get("available_tools", []))
+        if "available_tools" in state_dict:
+            observed_signals.add("available_tools")
+
+        required_steps = list(state_dict.get("required_steps", []) or [])
+        completed_steps = list(state_dict.get("completed_steps", []) or [])
+        if "required_steps" in state_dict:
+            observed_signals.add("required_steps")
+        if "completed_steps" in state_dict:
+            observed_signals.add("completed_steps")
+
+        prerequisite_map = state_dict.get("prerequisite_map", {}) or {}
+        if "prerequisite_map" in state_dict:
+            observed_signals.add("prerequisite_map")
+
+        upstream_artifacts = list(state_dict.get("upstream_artifacts", []) or [])
+        consumed_artifacts = list(state_dict.get("consumed_artifacts", []) or [])
+        if "upstream_artifacts" in state_dict:
+            observed_signals.add("upstream_artifacts")
+        if "consumed_artifacts" in state_dict:
+            observed_signals.add("consumed_artifacts")
+
+        final_answer_started = self._derive_final_answer_started(messages)
+        if "final_answer_started" in state_dict:
+            final_answer_started = bool(state_dict.get("final_answer_started", False))
+            observed_signals.add("final_answer_started")
+        elif final_answer_started:
+            observed_signals.add("final_answer_started")
+
+        missing_required_steps = [
+            step for step in required_steps
+            if step not in set(completed_steps)
+        ]
+        missing_prerequisites = [
+            prereq for prereq in prerequisite_map.get(attempted_tool, [])
+            if prereq not in set(completed_tools)
+        ]
+
+        sequence_violation_detected = bool(state_dict.get("sequence_violation_detected", False))
+        if not sequence_violation_detected and attempted_tool and prerequisite_map:
+            sequence_violation_detected = bool(missing_prerequisites)
+        if "sequence_violation_detected" in state_dict or missing_prerequisites:
+            observed_signals.add("sequence_violation_detected")
+
+        retry_loop_detected = bool(state_dict.get("retry_loop_detected", False))
+        if not retry_loop_detected and current_call_sig and last_failed_call_sig:
+            retry_loop_detected = current_call_sig == last_failed_call_sig
+        if "retry_loop_detected" in state_dict or retry_loop_detected:
+            observed_signals.add("retry_loop_detected")
+
+        hallucinated_tool_detected = bool(state_dict.get("hallucinated_tool_detected", False))
+        if not hallucinated_tool_detected and attempted_tool and available_tools:
+            hallucinated_tool_detected = attempted_tool not in set(available_tools)
+        if "hallucinated_tool_detected" in state_dict or hallucinated_tool_detected:
+            observed_signals.add("hallucinated_tool_detected")
+
+        requires_prior_context = bool(state_dict.get("requires_prior_context", False))
+        has_prior_context = bool(state_dict.get("has_prior_context", False))
+        if "requires_prior_context" in state_dict:
+            observed_signals.add("requires_prior_context")
+        if "has_prior_context" in state_dict:
+            observed_signals.add("has_prior_context")
 
         return {
             "task": {"description": task_description},
             "context": {
                 "selected_tool": selected_tool,
+                "attempted_tool": attempted_tool,
                 "tool_match_confidence": state_dict.get("tool_match_confidence", 0.5),
                 "has_required_params": state_dict.get("has_required_params", True),
                 "has_type_mismatch": state_dict.get("has_type_mismatch", False),
                 "has_extra_params": state_dict.get("has_extra_params", False),
                 "output_schema_valid": state_dict.get("output_schema_valid", True),
-                "requires_prior_context": state_dict.get("requires_prior_context", False),
-                "has_prior_context": state_dict.get("has_prior_context", False),
+                "requires_prior_context": requires_prior_context,
+                "has_prior_context": has_prior_context,
+                "completed_tools": completed_tools,
+                "failed_tools": failed_tools,
+                "required_steps": required_steps,
+                "completed_steps": completed_steps,
+                "missing_required_steps": missing_required_steps,
+                "prerequisite_map": prerequisite_map,
+                "missing_prerequisites": missing_prerequisites,
+                "final_answer_started": final_answer_started,
+                "available_tools": available_tools,
+                "last_failed_call_sig": last_failed_call_sig,
+                "current_call_sig": current_call_sig,
+                "upstream_artifacts": upstream_artifacts,
+                "consumed_artifacts": consumed_artifacts,
+                "sequence_violation_detected": sequence_violation_detected,
+                "retry_loop_detected": retry_loop_detected,
+                "hallucinated_tool_detected": hallucinated_tool_detected,
+                "runtime_signals": sorted(observed_signals),
                 "warnings": [],
                 "suggestions": [],
             },
         }
+
+    @staticmethod
+    def _normalize_tool_list(raw_tools: Any) -> List[str]:
+        names: List[str] = []
+        for tool in raw_tools or []:
+            if isinstance(tool, dict):
+                name = tool.get("name") or tool.get("tool_name")
+            else:
+                name = tool
+            if name:
+                names.append(str(name))
+        return names
+
+    @staticmethod
+    def _get_tool_name(msg: Any) -> str:
+        if isinstance(msg, dict):
+            return str(msg.get("name") or msg.get("tool_name") or "")
+        return str(getattr(msg, "name", getattr(msg, "tool_name", "")) or "")
+
+    @staticmethod
+    def _normalize_call_signature(tool_name: str, args: Any) -> str:
+        if not tool_name:
+            return ""
+        payload = args
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                payload = payload.strip()
+        if isinstance(payload, (dict, list)):
+            normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        else:
+            normalized = str(payload or "")
+        return f"{tool_name}:{normalized}"
+
+    def _derive_tool_history(self, messages: List[Any]) -> tuple[List[str], List[str], str]:
+        completed_tools: List[str] = []
+        failed_tools: List[str] = []
+        last_failed_call_sig = ""
+        last_ai_call_sig = ""
+        last_ai_tool_name = ""
+
+        for msg in messages:
+            msg_type = self._get_message_type(msg)
+            if msg_type == "ai":
+                tool_calls = self._get_tool_calls(msg)
+                if tool_calls:
+                    latest = tool_calls[0]
+                    last_ai_tool_name = str(latest.get("name", "") or "")
+                    last_ai_call_sig = self._normalize_call_signature(
+                        last_ai_tool_name,
+                        latest.get("args", latest.get("arguments", {})),
+                    )
+                continue
+
+            if msg_type != "tool":
+                continue
+
+            tool_name = self._get_tool_name(msg) or last_ai_tool_name
+            error = self._extract_error(msg)
+            if error:
+                if tool_name and tool_name not in failed_tools:
+                    failed_tools.append(tool_name)
+                if last_ai_call_sig:
+                    last_failed_call_sig = last_ai_call_sig
+                continue
+
+            if tool_name and tool_name not in completed_tools:
+                completed_tools.append(tool_name)
+
+        return completed_tools, failed_tools, last_failed_call_sig
+
+    def _derive_final_answer_started(self, messages: List[Any]) -> bool:
+        for msg in reversed(messages):
+            msg_type = self._get_message_type(msg)
+            if msg_type != "ai":
+                continue
+            if self._get_tool_calls(msg):
+                return False
+            return bool(self._get_message_content(msg).strip())
+        return False
+
+    def _runtime_supports_error_type(self, error_type: str, context: Dict[str, Any]) -> bool:
+        if not error_type:
+            return True
+        observed_signals = context.get("context", {}).get("runtime_signals", [])
+        return runtime_supports_error(error_type, observed_signals)
 
     @staticmethod
     def _get_message_type(msg: Any) -> str:
@@ -271,11 +479,19 @@ class CannyForgeMiddleware:
                 and (now - c.created_at) > STALE_DAYS * 86400
             )
         ]
+        corrections = [
+            c for c in corrections
+            if self._runtime_supports_error_type(c.error_type, context)
+        ]
 
         # Conditional rules (backward-compatible path)
         applicable = self._forge.knowledge_base.get_applicable_rules(
             self._skill_name, context
         )
+        applicable = [
+            rule for rule in applicable
+            if self._runtime_supports_error_type(rule.source_error_type, context)
+        ]
         for rule in applicable:
             context = rule.apply(context)
             self._rules_applied.append(rule.id)

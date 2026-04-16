@@ -47,6 +47,7 @@ class TestCannyForgeMiddleware:
         assert ctx["task"]["description"] == ""
         assert ctx["context"]["tool_match_confidence"] == 0.5
         assert ctx["context"]["has_required_params"] is True
+        assert ctx["context"]["runtime_signals"] == []
 
     def test_state_to_context_message_object(self, middleware):
         class FakeMsg:
@@ -54,6 +55,49 @@ class TestCannyForgeMiddleware:
         state = {"messages": [FakeMsg()]}
         ctx = middleware._state_to_context(state)
         assert ctx["task"]["description"] == "Search for docs"
+
+    def test_state_to_context_derives_stage_aware_runtime_signals(self, middleware):
+        state = {
+            "messages": [
+                {"role": "user", "content": "Place the trade after compliance"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "execute_trade", "args": {"ticker": "AAPL"}}],
+                },
+            ],
+            "completed_tools": ["fetch_client_portfolio"],
+            "required_steps": ["fetch_client_portfolio", "run_compliance_check", "execute_trade"],
+            "completed_steps": ["fetch_client_portfolio"],
+            "prerequisite_map": {"execute_trade": ["run_compliance_check"]},
+            "available_tools": ["fetch_client_portfolio", "run_compliance_check", "execute_trade"],
+            "upstream_artifacts": ["portfolio_snapshot"],
+            "consumed_artifacts": [],
+            "last_failed_call_sig": "execute_trade:{\"ticker\":\"AAPL\"}",
+        }
+
+        ctx = middleware._state_to_context(state)
+
+        assert ctx["context"]["attempted_tool"] == "execute_trade"
+        assert ctx["context"]["sequence_violation_detected"] is True
+        assert ctx["context"]["retry_loop_detected"] is True
+        assert ctx["context"]["hallucinated_tool_detected"] is False
+        assert ctx["context"]["missing_prerequisites"] == ["run_compliance_check"]
+        assert ctx["context"]["current_call_sig"] == "execute_trade:{\"ticker\":\"AAPL\"}"
+        assert set(ctx["context"]["runtime_signals"]) >= {
+            "attempted_tool",
+            "completed_tools",
+            "required_steps",
+            "completed_steps",
+            "prerequisite_map",
+            "available_tools",
+            "upstream_artifacts",
+            "consumed_artifacts",
+            "last_failed_call_sig",
+            "current_call_sig",
+            "sequence_violation_detected",
+            "retry_loop_detected",
+        }
 
     def test_before_model_no_rules(self, middleware):
         state = {"messages": [{"content": "hello"}]}
@@ -106,6 +150,65 @@ class TestCannyForgeMiddleware:
         content = first.get("content", "") if isinstance(first, dict) else first.content
         assert "[CANNYFORGE]" in content
         assert "search_web" in content
+
+    def test_before_model_filters_unsupported_multiturn_corrections(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_completion",
+                skill_name="tool_use",
+                error_type="PrematureExitError",
+                content="Do not stop early.",
+                source_errors=["e1"],
+                created_at=1.0,
+                correction_type="completion",
+            ),
+        )
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_tool",
+                skill_name="tool_use",
+                error_type="WrongToolError",
+                content="Pick the right tool.",
+                source_errors=["e2"],
+                created_at=1.0,
+                correction_type="tool_selection",
+            ),
+        )
+
+        result = middleware.before_model({"messages": [{"content": "Find latest AI news"}]})
+
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Pick the right tool" in content
+        assert "Do not stop early" not in content
+
+    def test_before_model_injects_supported_completion_correction(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_completion",
+                skill_name="tool_use",
+                error_type="PrematureExitError",
+                content="Finish all required steps before the final answer.",
+                source_errors=["e1"],
+                created_at=1.0,
+                correction_type="completion",
+            ),
+        )
+
+        state = {
+            "messages": [{"content": "Review the trade and finish the workflow"}],
+            "required_steps": ["fetch", "check", "execute"],
+            "completed_steps": ["fetch"],
+            "final_answer_started": True,
+        }
+        result = middleware.before_model(state)
+
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Finish all required steps" in content
 
     def test_finalize_task_marks_correction_effective(self, middleware, forge):
         """finalize_task(True) records correction as effective (task-level signal)."""
@@ -183,6 +286,73 @@ class TestCannyForgeMiddleware:
         errors = forge.learning_engine.error_repo.errors
         assert len(errors) >= 1
         assert errors[-1].error_type == "WrongToolError"
+
+    def test_before_model_skips_unsupported_premature_exit_rule(self, middleware, forge):
+        rule = Rule(
+            id="rule_premature_exit",
+            name="Premature exit",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.requires_prior_context", ConditionOperator.EQUALS, True),
+            ],
+            actions=[
+                Action("append", "context.warnings", "Do not stop early."),
+            ],
+            source_error_type="PrematureExitError",
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+
+        result = middleware.before_model(
+            {
+                "messages": [{"content": "Handle the multi-step task"}],
+                "requires_prior_context": True,
+            }
+        )
+
+        assert middleware.rules_applied == []
+        assert result == {"messages": [{"content": "Handle the multi-step task"}]}
+
+    def test_before_model_applies_supported_sequence_rule(self, middleware, forge):
+        rule = Rule(
+            id="rule_sequence",
+            name="Sequence",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.sequence_violation_detected", ConditionOperator.EQUALS, True),
+            ],
+            actions=[
+                Action("append", "context.warnings", "Complete prerequisites first."),
+            ],
+            source_error_type="SequenceViolationError",
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "Place the trade after compliance"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "execute_trade", "args": {"ticker": "AAPL"}}],
+                },
+                {
+                    "type": "tool",
+                    "name": "execute_trade",
+                    "status": "error",
+                    "content": "SequenceViolationError: compliance check missing",
+                },
+            ],
+            "completed_tools": ["fetch_client_portfolio"],
+            "prerequisite_map": {"execute_trade": ["run_compliance_check"]},
+        }
+        result = middleware.before_model(state)
+
+        assert "rule_sequence" in middleware.rules_applied
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Complete prerequisites first" in content
 
     def test_before_model_uses_low_confidence_default_for_rule_matching(self, middleware, forge):
         rule = Rule(
