@@ -151,6 +151,57 @@ class TestCannyForgeMiddleware:
         assert "[CANNYFORGE]" in content
         assert "search_web" in content
 
+    def test_before_model_scopes_domain_corrections(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_base",
+                skill_name="tool_use",
+                error_type="FormatError",
+                content="Use valid JSON arguments.",
+                source_errors=["e1"],
+                created_at=1.0,
+            ),
+        )
+        forge.knowledge_base.add_correction(
+            "tool_use_mcp",
+            Correction(
+                id="corr_mcp",
+                skill_name="tool_use_mcp",
+                error_type="FormatError",
+                content="Check calendar before scheduling the meeting.",
+                source_errors=["e2"],
+                created_at=1.0,
+                correction_type="arg_format",
+            ),
+        )
+        forge.knowledge_base.add_correction(
+            "tool_use_coding",
+            Correction(
+                id="corr_coding",
+                skill_name="tool_use_coding",
+                error_type="WrongToolError",
+                content="Use read_file, NOT edit_file.",
+                source_errors=["e3"],
+                created_at=1.0,
+                correction_type="tool_selection",
+            ),
+        )
+
+        result = middleware.before_model(
+            {
+                "messages": [{"content": "Find an open time and schedule the meeting."}],
+                "scenario_domain": "mcp",
+                "metadata": {"scenario_domain": "mcp"},
+            }
+        )
+
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Use valid JSON arguments." in content
+        assert "Check calendar before scheduling the meeting." in content
+        assert "Use read_file, NOT edit_file." not in content
+
     def test_before_model_filters_unsupported_multiturn_corrections(self, middleware, forge):
         forge.knowledge_base.add_correction(
             "tool_use",
@@ -263,6 +314,33 @@ class TestCannyForgeMiddleware:
         recovered = forge.knowledge_base.get_corrections("tool_use")[0]
         assert recovered.times_injected == 2
         assert recovered.times_effective == 1
+
+    def test_finalize_task_uses_cumulative_injections_across_turns(self, middleware, forge):
+        correction = Correction(
+            id="corr_multi_turn",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Choose tools carefully.",
+            source_errors=["e1"],
+            created_at=1.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", correction)
+
+        middleware.begin_task()
+        middleware.before_model({"messages": [{"content": "first request"}]})
+        middleware.after_model({"messages": [{"content": "first output"}]})
+
+        middleware.before_model({
+            "messages": [
+                {"type": "ai", "content": "working"},
+                {"type": "tool", "status": "ok", "content": "done"},
+            ]
+        })
+
+        middleware.finalize_task(True)
+        saved = forge.knowledge_base.get_corrections("tool_use")[0]
+        assert saved.times_injected == 1
+        assert saved.times_effective == 1
 
     def test_after_model_no_errors(self, middleware):
         middleware._last_context = {"task": {"description": "test"}}

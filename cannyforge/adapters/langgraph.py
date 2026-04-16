@@ -94,6 +94,30 @@ class CannyForgeMiddleware:
     def _corrections_injected(self, value: List[str]):
         self._local.corrections_injected = value
 
+    @property
+    def _task_rules_applied(self) -> List[str]:
+        return getattr(self._local, 'task_rules_applied', [])
+
+    @_task_rules_applied.setter
+    def _task_rules_applied(self, value: List[str]):
+        self._local.task_rules_applied = value
+
+    @property
+    def _task_corrections_injected(self) -> List[str]:
+        return getattr(self._local, 'task_corrections_injected', [])
+
+    @_task_corrections_injected.setter
+    def _task_corrections_injected(self, value: List[str]):
+        self._local.task_corrections_injected = value
+
+    def begin_task(self) -> None:
+        """Reset cumulative per-task middleware state before an agent run."""
+        self._last_context = {}
+        self._rules_applied = []
+        self._corrections_injected = []
+        self._task_rules_applied = []
+        self._task_corrections_injected = []
+
     def _state_to_context(self, state: Any) -> Dict[str, Any]:
         """Convert LangGraph AgentState to CannyForge context dict.
 
@@ -262,6 +286,26 @@ class CannyForgeMiddleware:
                 "suggestions": [],
             },
         }
+
+    def _resolve_active_skill_names(self, state_dict: Dict[str, Any]) -> List[str]:
+        """Return the base skill plus the matching domain-scoped namespace."""
+        skill_names = [self._skill_name]
+
+        domain = str(state_dict.get("scenario_domain", "") or "").strip()
+        if not domain:
+            metadata = state_dict.get("metadata", {}) or {}
+            domain = str(metadata.get("scenario_domain", "") or "").strip()
+
+        if domain and not self._skill_name.endswith(f"_{domain}"):
+            scoped_skill = f"{self._skill_name}_{domain}"
+            if scoped_skill != self._skill_name:
+                skill_names.append(scoped_skill)
+
+        deduped: List[str] = []
+        for skill_name in skill_names:
+            if skill_name not in deduped:
+                deduped.append(skill_name)
+        return deduped
 
     @staticmethod
     def _normalize_tool_list(raw_tools: Any) -> List[str]:
@@ -457,15 +501,21 @@ class CannyForgeMiddleware:
         context = self._state_to_context(state)
         self._rules_applied = []
         self._corrections_injected = []
+        if not hasattr(self._local, 'task_rules_applied'):
+            self._task_rules_applied = []
+        if not hasattr(self._local, 'task_corrections_injected'):
+            self._task_corrections_injected = []
+
+        if isinstance(state, dict):
+            state_dict = state
+        elif hasattr(state, '__dict__'):
+            state_dict = state.__dict__
+        else:
+            state_dict = {}
 
         # Always-on corrections (LangGraph correction path).
-        # Pull from the base skill AND any domain sub-skills (e.g. tool_use_data)
-        # so that corrections learned per-domain are injected when relevant.
-        all_skill_names = [self._skill_name]
-        all_skill_names += [
-            sk for sk in self._forge.knowledge_base.list_skills()
-            if sk.startswith(self._skill_name + "_")
-        ]
+        # Pull from the base skill plus the active domain namespace only.
+        all_skill_names = self._resolve_active_skill_names(state_dict)
         raw_corrections: List = []
         for sk in all_skill_names:
             raw_corrections.extend(self._forge.knowledge_base.get_corrections(sk))
@@ -485,16 +535,25 @@ class CannyForgeMiddleware:
         ]
 
         # Conditional rules (backward-compatible path)
-        applicable = self._forge.knowledge_base.get_applicable_rules(
-            self._skill_name, context
-        )
+        applicable = []
+        for sk in all_skill_names:
+            applicable.extend(self._forge.knowledge_base.get_applicable_rules(sk, context))
         applicable = [
             rule for rule in applicable
             if self._runtime_supports_error_type(rule.source_error_type, context)
         ]
+        deduped_applicable = []
+        seen_rule_ids = set()
+        for rule in applicable:
+            if rule.id in seen_rule_ids:
+                continue
+            deduped_applicable.append(rule)
+            seen_rule_ids.add(rule.id)
+        applicable = deduped_applicable
         for rule in applicable:
             context = rule.apply(context)
             self._rules_applied.append(rule.id)
+            self._task_rules_applied.append(rule.id)
 
         self._last_context = context
 
@@ -504,13 +563,6 @@ class CannyForgeMiddleware:
                 len(self._rules_applied),
                 self._rules_applied,
             )
-
-        if isinstance(state, dict):
-            state_dict = state
-        elif hasattr(state, '__dict__'):
-            state_dict = state.__dict__
-        else:
-            state_dict = {}
 
         rule_ctx = context.get("context", {})
         rule_warnings = rule_ctx.get("warnings", [])
@@ -592,6 +644,7 @@ class CannyForgeMiddleware:
             for correction in corrections:
                 self._forge.knowledge_base.record_correction_injection(correction.id)
                 self._corrections_injected.append(correction.id)
+                self._task_corrections_injected.append(correction.id)
             if corrections:
                 self._forge.knowledge_base.save_corrections()
 
@@ -671,12 +724,16 @@ class CannyForgeMiddleware:
         but won't be auto-deprecated.  Call this whenever a task-level outcome
         is available.
         """
-        injected = list(self._corrections_injected)
+        injected = list(self._task_corrections_injected)
         if not injected:
             return
         for correction_id in injected:
             self._forge.knowledge_base.record_correction_outcome(correction_id, success)
         self._forge.knowledge_base.save_corrections()
+        self._task_corrections_injected = []
+        self._task_rules_applied = []
+        self._corrections_injected = []
+        self._rules_applied = []
         logger.debug(
             "finalize_task(success=%s) — recorded outcome for %d corrections: %s",
             success, len(injected), injected,
@@ -709,3 +766,13 @@ class CannyForgeMiddleware:
     def rules_applied(self) -> List[str]:
         """Return the list of rule IDs applied in the last before_model call."""
         return list(self._rules_applied)
+
+    @property
+    def task_rules_applied(self) -> List[str]:
+        """Return the full list of rule IDs applied across the current task."""
+        return list(self._task_rules_applied)
+
+    @property
+    def task_corrections_injected(self) -> List[str]:
+        """Return the full list of correction IDs injected across the current task."""
+        return list(self._task_corrections_injected)

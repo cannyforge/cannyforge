@@ -144,6 +144,30 @@ def detect_context_amnesia(trace: List[TraceEntry], anti_pattern: Dict) -> bool:
     return False
 
 
+def detect_wrong_tool(trace: List[TraceEntry], anti_pattern: Dict) -> bool:
+    """Check if a known wrong tool/argument pattern was used.
+
+    anti_pattern format:
+        {
+            "type": "wrong_tool",
+            "detect": {
+                "tool": "fetch_market_data",
+                "args_contain": {"symbol": "MORTGAGE"}
+            }
+        }
+    """
+    detect = anti_pattern.get("detect", anti_pattern)
+    target_tool = detect.get("tool")
+    expected_args = detect.get("args_contain", {})
+
+    for entry in trace:
+        if target_tool and entry.tool != target_tool:
+            continue
+        if TraceEvaluator._score_args_match(entry.args, expected_args) == 1.0:
+            return True
+    return False
+
+
 def _stable_args_key(args: Dict[str, Any]) -> str:
     """Create a hashable key from args dict for dedup comparison."""
     return str(sorted(args.items()))
@@ -155,7 +179,73 @@ _ANTI_PATTERN_DETECTORS = {
     "retry_loop": detect_retry_loop,
     "hallucinated_tool": detect_hallucinated_tool,
     "context_amnesia": detect_context_amnesia,
+    "wrong_tool": detect_wrong_tool,
 }
+
+
+def _required_expected_calls(expected: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        call for call in expected.get("calls", [])
+        if not call.get("optional", False)
+    ]
+
+
+def _successful_entries(trace: List[TraceEntry]) -> List[TraceEntry]:
+    return [entry for entry in trace if entry.status == "ok"]
+
+
+def _count_matched_expected_calls(
+    trace: List[TraceEntry],
+    expected: Dict[str, Any],
+) -> int:
+    expected_calls = _required_expected_calls(expected)
+    successes = _successful_entries(trace)
+    if not expected_calls:
+        return 0
+
+    ordering = expected.get("ordering", "partial")
+    if ordering == "strict":
+        matched = 0
+        success_index = 0
+        for exp_call in expected_calls:
+            if success_index >= len(successes):
+                break
+            actual = successes[success_index]
+            if actual.tool != exp_call["tool"]:
+                break
+            if TraceEvaluator._score_args_match(actual.args, exp_call.get("args_contain", {})) < 1.0:
+                break
+            matched += 1
+            success_index += 1
+        return matched
+
+    matched = 0
+    tool_occurrence: Dict[str, int] = {}
+    for exp_call in expected_calls:
+        tool_name = exp_call["tool"]
+        occurrence_index = tool_occurrence.get(tool_name, 0)
+        matching_entries = [entry for entry in successes if entry.tool == tool_name]
+        if occurrence_index >= len(matching_entries):
+            break
+        actual = matching_entries[occurrence_index]
+        if TraceEvaluator._score_args_match(actual.args, exp_call.get("args_contain", {})) < 1.0:
+            break
+        tool_occurrence[tool_name] = occurrence_index + 1
+        matched += 1
+    return matched
+
+
+def _next_unmet_expected_call(
+    trace: List[TraceEntry],
+    expected: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    expected_calls = _required_expected_calls(expected)
+    if not expected_calls:
+        return None
+    matched = _count_matched_expected_calls(trace, expected)
+    if matched >= len(expected_calls):
+        return None
+    return expected_calls[matched]
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +273,8 @@ class TraceEvaluator:
 
         tool_score = self._score_tool_selection(trace, expected)
         arg_score = self._score_arg_quality(trace, expected)
-        seq_score = self._score_sequence(trace, expected)
-        recovery = self._score_recovery(trace, error_injections)
+        seq_score = self._score_sequence(trace, expected, anti_patterns)
+        recovery = self._score_recovery(trace, error_injections, expected)
         hits = self._detect_anti_patterns(trace, anti_patterns, available_tools)
         efficiency = self._score_efficiency(trace, expected)
 
@@ -246,7 +336,15 @@ class TraceEvaluator:
 
     def _score_arg_quality(self, trace: List[TraceEntry],
                             expected: Dict) -> float:
-        """Score argument match quality for each expected call."""
+        """Score argument match quality for each expected call.
+
+        Uses position-aware matching: the Nth expected call for a given tool
+        is scored against the Nth actual occurrence of that tool in the trace.
+        This ensures that when the same tool is called twice (e.g.
+        fetch_market_data for AAPL then MSFT), each expected call is matched
+        to its correct counterpart rather than both being scored against the
+        first occurrence.
+        """
         expected_calls = expected.get("calls", [])
         if not expected_calls:
             return 1.0
@@ -255,24 +353,33 @@ class TraceEvaluator:
         if not scorable:
             return 1.0
 
+        # Track how many times we've already consumed each tool's occurrences
+        tool_occurrence: Dict[str, int] = {}
         total = 0.0
         for exp_call in scorable:
-            # Find the first matching tool call in trace
-            match = self._find_matching_call(trace, exp_call["tool"])
+            tool_name = exp_call["tool"]
+            n = tool_occurrence.get(tool_name, 0)
+            match = self._find_nth_occurrence(trace, tool_name, n)
+            tool_occurrence[tool_name] = n + 1
+
             if match is None:
-                # Tool wasn't called at all — arg score is 0
+                # Tool wasn't called at all (or not enough times) — score 0
                 total += 0.0
                 continue
             total += self._score_args_match(match.args, exp_call["args_contain"])
 
         return total / len(scorable)
 
-    def _find_matching_call(self, trace: List[TraceEntry],
-                             tool_name: str) -> Optional[TraceEntry]:
-        """Find first trace entry matching tool_name."""
+    @staticmethod
+    def _find_nth_occurrence(trace: List[TraceEntry], tool_name: str,
+                              n: int) -> Optional[TraceEntry]:
+        """Return the nth (0-indexed) occurrence of tool_name in trace, or None."""
+        count = 0
         for entry in trace:
             if entry.tool == tool_name:
-                return entry
+                if count == n:
+                    return entry
+                count += 1
         return None
 
     @staticmethod
@@ -295,8 +402,19 @@ class TraceEvaluator:
     # -- Sequence scoring --
 
     def _score_sequence(self, trace: List[TraceEntry],
-                         expected: Dict) -> float:
-        """Score ordering constraints."""
+                         expected: Dict,
+                         anti_patterns: Optional[List[Dict]] = None) -> float:
+        """Score ordering constraints.
+
+        For ``strict`` ordering: expected tools must appear at exact positions.
+
+        For ``partial`` ordering: prerequisite edges are extracted from
+        ``anti_patterns`` (``sequence_violation`` entries) and each edge is
+        checked independently.  A violated edge (target called before its
+        prerequisite) lowers the score.  If no sequence_violation anti-patterns
+        are declared, falls back to the subsequence check for backward
+        compatibility.
+        """
         expected_calls = expected.get("calls", [])
         ordering = expected.get("ordering", "partial")
 
@@ -308,8 +426,35 @@ class TraceEvaluator:
 
         if ordering == "strict":
             return self._strict_sequence_score(actual_tools, expected_tools)
-        else:
-            return self._subsequence_score(actual_tools, expected_tools)
+
+        # Partial ordering — derive prerequisite edges from anti-patterns
+        sv_patterns = [
+            ap for ap in (anti_patterns or [])
+            if ap.get("type") == "sequence_violation"
+        ]
+        if sv_patterns:
+            return self._prerequisite_score(trace, sv_patterns)
+
+        # Fallback: no declared prerequisites → use subsequence check
+        return self._subsequence_score(actual_tools, expected_tools)
+
+    @staticmethod
+    def _prerequisite_score(trace: List[TraceEntry],
+                             sv_patterns: List[Dict]) -> float:
+        """Score the fraction of sequence-violation edges that were NOT triggered.
+
+        Each entry in sv_patterns describes one prerequisite constraint.
+        ``detect_sequence_violation`` returns True when the constraint is
+        *violated*.  A score of 1.0 means all prerequisites were respected;
+        0.0 means every prerequisite was violated.
+        """
+        if not sv_patterns:
+            return 1.0
+        satisfied = sum(
+            1 for ap in sv_patterns
+            if not detect_sequence_violation(trace, ap)
+        )
+        return satisfied / len(sv_patterns)
 
     @staticmethod
     def _strict_sequence_score(actual: List[str], expected: List[str]) -> float:
@@ -372,11 +517,12 @@ class TraceEvaluator:
     # -- Recovery scoring --
 
     def _score_recovery(self, trace: List[TraceEntry],
-                         error_injections: List[Dict]) -> float:
+                         error_injections: List[Dict],
+                         expected: Dict[str, Any]) -> float:
         """Score whether the agent recovered from injected errors.
 
-        Recovery = after an error, the agent tried a *different* action
-        (not the exact same call again).
+        Recovery = after an error, the agent completed the next unmet expected
+        step for the task, rather than merely issuing any different call.
         """
         if not error_injections:
             return 1.0  # No errors to recover from → perfect score
@@ -392,14 +538,20 @@ class TraceEvaluator:
 
         recovered = 0
         for idx in error_indices:
-            if idx + 1 < len(trace):
-                next_entry = trace[idx + 1]
-                error_entry = trace[idx]
-                # Recovery = next call is different from the failed one
-                if (next_entry.tool != error_entry.tool
-                        or next_entry.args != error_entry.args):
-                    recovered += 1
-            # If it's the last call and it errored, no recovery attempted
+            expected_next = _next_unmet_expected_call(trace[:idx], expected)
+            if expected_next is None:
+                continue
+
+            for entry in trace[idx + 1:]:
+                if entry.status != "ok":
+                    continue
+                if entry.tool != expected_next["tool"]:
+                    continue
+                if TraceEvaluator._score_args_match(entry.args, expected_next.get("args_contain", {})) < 1.0:
+                    continue
+                recovered += 1
+                break
+
         return recovered / len(error_indices) if error_indices else 1.0
 
     # -- Efficiency scoring --

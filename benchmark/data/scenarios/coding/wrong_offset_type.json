@@ -3,17 +3,33 @@
   "domain": "coding",
   "title": "Wrong argument type for file offset",
   "difficulty": "medium",
-  "failure_modes": ["arg_mangling"],
+  "failure_modes": [
+    "arg_mangling"
+  ],
   "setup": {
     "files": {
       "/workspace/server.py": "import flask\n\napp = flask.Flask(__name__)\n\n@app.route('/')\ndef index():\n    return 'Hello World'\n\n@app.route('/api/users')\ndef users():\n    return {'users': []}\n\nif __name__ == '__main__':\n    app.run(debug=True)\n"
     }
   },
   "user_message": "Read lines 8 through 12 of /workspace/server.py to see the users endpoint",
-  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "tools": [
+    "read_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "run_test",
+    "git_commit"
+  ],
   "expected_trace": {
     "calls": [
-      {"tool": "read_file", "args_contain": {"file_path": "server.py", "offset": "^[0-9]+$"}, "optional": false}
+      {
+        "tool": "read_file",
+        "args_contain": {
+          "file_path": "server.py",
+          "offset": "^[0-9]+$"
+        },
+        "optional": false
+      }
     ],
     "ordering": "partial",
     "max_calls": 3
@@ -21,8 +37,19 @@
   "anti_patterns": [],
   "error_injections": [
     {
-      "condition": {"tool": "read_file", "arg_type_mismatch": {"offset": "int"}},
-      "response": {"status": "error", "message": "TypeError: offset must be an integer, got string. Use offset=7 (0-indexed line number), not offset='8-12'."}
+      "condition": {
+        "tool": "read_file",
+        "arg_type_mismatch": {
+          "offset": "int"
+        }
+      },
+      "response": {
+        "status": "error",
+        "message": "TypeError: offset must be an integer, got string. Use offset=7 (0-indexed line number), not offset='8-12'."
+      }
     }
-  ]
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
 }

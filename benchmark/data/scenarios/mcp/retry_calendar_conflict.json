@@ -3,22 +3,54 @@
   "domain": "mcp",
   "title": "Retry loop on calendar conflict",
   "difficulty": "hard",
-  "failure_modes": ["retry_loop"],
+  "failure_modes": [
+    "retry_loop"
+  ],
   "setup": {
     "calendar": {
       "2026-04-07": [
-        {"time": "09:00", "duration": 60, "title": "Morning sync"},
-        {"time": "10:00", "duration": 60, "title": "Team standup"},
-        {"time": "14:00", "duration": 120, "title": "Design review"}
+        {
+          "time": "09:00",
+          "duration": 60,
+          "title": "Morning sync"
+        },
+        {
+          "time": "10:00",
+          "duration": 60,
+          "title": "Team standup"
+        },
+        {
+          "time": "14:00",
+          "duration": 120,
+          "title": "Design review"
+        }
       ]
     }
   },
   "user_message": "Find a free 1-hour slot on April 7th and schedule a meeting with Bob",
-  "tools": ["check_calendar", "schedule_meeting", "send_email", "search_web", "read_file"],
+  "tools": [
+    "check_calendar",
+    "schedule_meeting",
+    "send_email",
+    "search_web",
+    "read_file"
+  ],
   "expected_trace": {
     "calls": [
-      {"tool": "check_calendar", "args_contain": {"date": "2026-04-07"}, "optional": false},
-      {"tool": "schedule_meeting", "args_contain": {"date": "2026-04-07"}, "optional": false}
+      {
+        "tool": "check_calendar",
+        "args_contain": {
+          "date": "2026-04-07"
+        },
+        "optional": false
+      },
+      {
+        "tool": "schedule_meeting",
+        "args_contain": {
+          "date": "2026-04-07"
+        },
+        "optional": false
+      }
     ],
     "ordering": "strict",
     "max_calls": 5
@@ -27,13 +59,25 @@
     {
       "id": "schedule_retry_loop",
       "type": "retry_loop",
-      "detect": {"type": "retry_loop", "min_repeats": 2}
+      "detect": {
+        "type": "retry_loop",
+        "min_repeats": 2
+      }
     }
   ],
   "error_injections": [
     {
-      "condition": {"tool": "schedule_meeting", "call_index": 0},
-      "response": {"status": "error", "message": "Conflict: slot occupied. Available slots on 2026-04-07: 11:00-12:00, 12:00-13:00, 16:00-17:00."}
+      "condition": {
+        "tool": "schedule_meeting",
+        "call_index": 0
+      },
+      "response": {
+        "status": "error",
+        "message": "Conflict: slot occupied. Available slots on 2026-04-07: 11:00-12:00, 12:00-13:00, 16:00-17:00."
+      }
     }
-  ]
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
 }

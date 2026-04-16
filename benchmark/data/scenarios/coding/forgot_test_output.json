@@ -3,7 +3,9 @@
   "domain": "coding",
   "title": "Re-running test when output already available",
   "difficulty": "medium",
-  "failure_modes": ["context_amnesia"],
+  "failure_modes": [
+    "context_amnesia"
+  ],
   "setup": {
     "files": {
       "/workspace/test_math.py": "def test_add():\n    assert 1 + 1 == 2\n\ndef test_subtract():\n    assert 5 - 3 == 2\n",
@@ -11,10 +13,23 @@
     }
   },
   "user_message": "Run the tests in test_math.py and then fix any failures. If all pass, tell me the results.",
-  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "tools": [
+    "read_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "run_test",
+    "git_commit"
+  ],
   "expected_trace": {
     "calls": [
-      {"tool": "run_test", "args_contain": {"test_file": "test_math"}, "optional": false}
+      {
+        "tool": "run_test",
+        "args_contain": {
+          "test_file": "test_math"
+        },
+        "optional": false
+      }
     ],
     "ordering": "partial",
     "max_calls": 4
@@ -23,8 +38,14 @@
     {
       "id": "rerun_test",
       "type": "context_amnesia",
-      "detect": {"tool": "run_test", "type": "context_amnesia"}
+      "detect": {
+        "tool": "run_test",
+        "type": "context_amnesia"
+      }
     }
   ],
-  "error_injections": []
+  "error_injections": [],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
 }

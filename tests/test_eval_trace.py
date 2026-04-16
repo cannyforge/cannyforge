@@ -19,6 +19,7 @@ from benchmark.eval_trace import (
     detect_retry_loop,
     detect_hallucinated_tool,
     detect_context_amnesia,
+    detect_wrong_tool,
 )
 
 
@@ -477,27 +478,55 @@ class TestEvaluateIntegration:
         assert score.arg_quality_score == pytest.approx(1 / 3)  # only first fetch matched
 
     def test_recovery_after_error(self):
-        """Error then different tool → recovery_score = 1.0."""
+        """Recovery requires completing the next unmet expected step after the error."""
         ev = TraceEvaluator()
         trace = [
-            make_entry("chart", status="error"),
-            make_entry("validate", {}),              # recovery: different tool
+            make_entry("chart", {"chart_type": "line"}, status="error"),
+            make_entry("validate", {}, status="ok"),
             make_entry("chart", {"chart_type": "line"}, status="ok"),
         ]
         scenario = make_scenario(
+            calls=[
+                {"tool": "validate", "args_contain": {}, "optional": False},
+                {"tool": "chart", "args_contain": {"chart_type": "line"}, "optional": False},
+            ],
+            ordering="strict",
             error_injections=[{"condition": {}, "response": {"status": "error"}}],
         )
         score = ev.evaluate(scenario, trace)
         assert score.recovery_score == 1.0
 
+    def test_no_recovery_for_irrelevant_different_tool(self):
+        """A different call that does not satisfy the next expected step is not recovery."""
+        ev = TraceEvaluator()
+        trace = [
+            make_entry("chart", {"chart_type": "line"}, status="error"),
+            make_entry("fetch", {"symbol": "AAPL"}, status="ok"),
+        ]
+        scenario = make_scenario(
+            calls=[
+                {"tool": "validate", "args_contain": {}, "optional": False},
+                {"tool": "chart", "args_contain": {"chart_type": "line"}, "optional": False},
+            ],
+            ordering="strict",
+            error_injections=[{"condition": {}, "response": {"status": "error"}}],
+        )
+        score = ev.evaluate(scenario, trace)
+        assert score.recovery_score == 0.0
+
     def test_no_recovery_same_call_repeated(self):
-        """Same failed call repeated → recovery_score = 0.0."""
+        """Repeating the failed call without satisfying the unmet step is not recovery."""
         ev = TraceEvaluator()
         trace = [
             make_entry("chart", {"chart_type": "line"}, status="error"),
             make_entry("chart", {"chart_type": "line"}, status="error"),
         ]
         scenario = make_scenario(
+            calls=[
+                {"tool": "validate", "args_contain": {}, "optional": False},
+                {"tool": "chart", "args_contain": {"chart_type": "line"}, "optional": False},
+            ],
+            ordering="strict",
             error_injections=[{"condition": {}, "response": {"status": "error"}}],
         )
         score = ev.evaluate(scenario, trace)
@@ -656,6 +685,31 @@ class TestDetectContextAmnesia:
         ]
         ap = {"detect": {}}  # no tool filter
         assert detect_context_amnesia(trace, ap) is True
+
+
+class TestDetectWrongTool:
+
+    def test_wrong_tool_detected(self):
+        trace = [make_entry("fetch_market_data", {"symbol": "MORTGAGE30US"})]
+        ap = {
+            "type": "wrong_tool",
+            "detect": {
+                "tool": "fetch_market_data",
+                "args_contain": {"symbol": "MORTGAGE"},
+            },
+        }
+        assert detect_wrong_tool(trace, ap) is True
+
+    def test_wrong_tool_not_detected_for_expected_tool(self):
+        trace = [make_entry("fetch_economic_data", {"series_id": "MORTGAGE30US"})]
+        ap = {
+            "type": "wrong_tool",
+            "detect": {
+                "tool": "fetch_market_data",
+                "args_contain": {"symbol": "MORTGAGE"},
+            },
+        }
+        assert detect_wrong_tool(trace, ap) is False
 
 
 # ---------------------------------------------------------------------------

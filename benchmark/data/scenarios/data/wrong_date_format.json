@@ -3,17 +3,33 @@
   "domain": "data",
   "title": "Wrong date format in API query",
   "difficulty": "medium",
-  "failure_modes": ["arg_mangling"],
+  "failure_modes": [
+    "arg_mangling"
+  ],
   "setup": {
     "databases": {
       "economic": {
-        "CPI": {"2024-01-01": 308.4, "2024-06-01": 314.2, "2024-12-01": 317.8},
-        "GDP": {"2024-Q1": 28.27, "2024-Q2": 28.63, "2024-Q3": 29.02}
+        "CPI": {
+          "2024-01-01": 308.4,
+          "2024-06-01": 314.2,
+          "2024-12-01": 317.8
+        },
+        "GDP": {
+          "2024-Q1": 28.27,
+          "2024-Q2": 28.63,
+          "2024-Q3": 29.02
+        }
       }
     }
   },
   "user_message": "Get CPI data from January 1st 2024 to December 31st 2024",
-  "tools": ["fetch_economic_data", "fetch_market_data", "query_db", "create_chart", "validate_data"],
+  "tools": [
+    "fetch_economic_data",
+    "fetch_market_data",
+    "query_db",
+    "create_chart",
+    "validate_data"
+  ],
   "expected_trace": {
     "calls": [
       {
@@ -32,8 +48,19 @@
   "anti_patterns": [],
   "error_injections": [
     {
-      "condition": {"tool": "fetch_economic_data", "arg_format_mismatch": {"start_date": "^\\d{4}-\\d{2}-\\d{2}$"}},
-      "response": {"status": "error", "message": "ValueError: date must be ISO 8601 format (YYYY-MM-DD), got '01/01/2024'. Use start_date='2024-01-01'."}
+      "condition": {
+        "tool": "fetch_economic_data",
+        "arg_format_mismatch": {
+          "start_date": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "response": {
+        "status": "error",
+        "message": "ValueError: date must be ISO 8601 format (YYYY-MM-DD), got '01/01/2024'. Use start_date='2024-01-01'."
+      }
     }
-  ]
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
 }

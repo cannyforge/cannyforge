@@ -3,23 +3,61 @@
   "domain": "data",
   "title": "Visualize before validating data",
   "difficulty": "medium",
-  "failure_modes": ["sequence_violation"],
+  "failure_modes": [
+    "sequence_violation"
+  ],
   "setup": {
     "databases": {
       "market": {
-        "AAPL": {"2024-01-02": 185.3, "2024-06-03": 192.1, "2024-12-31": 198.7},
-        "MSFT": {"2024-01-02": 372.5, "2024-06-03": 415.2, "2024-12-31": 421.8}
+        "AAPL": {
+          "2024-01-02": 185.3,
+          "2024-06-03": 192.1,
+          "2024-12-31": 198.7
+        },
+        "MSFT": {
+          "2024-01-02": 372.5,
+          "2024-06-03": 415.2,
+          "2024-12-31": 421.8
+        }
       }
     }
   },
   "user_message": "Fetch AAPL and MSFT stock data for 2024, validate there are no gaps, then create a comparison chart",
-  "tools": ["fetch_economic_data", "fetch_market_data", "query_db", "create_chart", "validate_data"],
+  "tools": [
+    "fetch_economic_data",
+    "fetch_market_data",
+    "query_db",
+    "create_chart",
+    "validate_data"
+  ],
   "expected_trace": {
     "calls": [
-      {"tool": "fetch_market_data", "args_contain": {"symbol": "AAPL"}, "optional": false},
-      {"tool": "fetch_market_data", "args_contain": {"symbol": "MSFT"}, "optional": false},
-      {"tool": "validate_data", "args_contain": {}, "optional": false},
-      {"tool": "create_chart", "args_contain": {"chart_type": "line|comparison"}, "optional": false}
+      {
+        "tool": "fetch_market_data",
+        "args_contain": {
+          "symbol": "AAPL"
+        },
+        "optional": false
+      },
+      {
+        "tool": "fetch_market_data",
+        "args_contain": {
+          "symbol": "MSFT"
+        },
+        "optional": false
+      },
+      {
+        "tool": "validate_data",
+        "args_contain": {},
+        "optional": false
+      },
+      {
+        "tool": "create_chart",
+        "args_contain": {
+          "chart_type": "line|comparison"
+        },
+        "optional": false
+      }
     ],
     "ordering": "partial",
     "max_calls": 6
@@ -28,13 +66,25 @@
     {
       "id": "chart_before_validate",
       "type": "sequence_violation",
-      "detect": {"tool": "create_chart", "missing_prior": "validate_data"}
+      "detect": {
+        "tool": "create_chart",
+        "missing_prior": "validate_data"
+      }
     }
   ],
   "error_injections": [
     {
-      "condition": {"tool": "create_chart", "missing_prior": "validate_data"},
-      "response": {"status": "error", "message": "Warning: data has not been validated. Run validate_data first to check for gaps or anomalies."}
+      "condition": {
+        "tool": "create_chart",
+        "missing_prior": "validate_data"
+      },
+      "response": {
+        "status": "error",
+        "message": "Warning: data has not been validated. Run validate_data first to check for gaps or anomalies."
+      }
     }
-  ]
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
 }

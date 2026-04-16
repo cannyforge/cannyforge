@@ -4,11 +4,21 @@
 import sys
 from types import SimpleNamespace
 from pathlib import Path
+import importlib
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from benchmark.eval_trace import TraceEntry
-from benchmark.scenario_harness import MockToolRouter, RunResult, ScenarioHarness, ScenarioRunner
+from benchmark.eval_trace import TraceScore
+from benchmark.scenario_harness import (
+    MockToolRouter,
+    RunResult,
+    ScenarioHarness,
+    ScenarioRunner,
+    _load_learning_checkpoint,
+    _save_learning_checkpoint,
+)
+from cannyforge.corrections import Correction
 from cannyforge.knowledge import KnowledgeBase
 from cannyforge.learning import LearningEngine
 
@@ -43,6 +53,7 @@ EDIT_BEFORE_READ_SCENARIO = {
             "response": {"status": "error", "message": "Read the file first"},
         }
     ],
+    "success_condition": {"type": "expected_trace_match"},
 }
 
 HALLUCINATION_SCENARIO = {
@@ -110,6 +121,14 @@ class TestMockToolRouter:
         router = MockToolRouter(HALLUCINATION_SCENARIO)
         result = router.call("any_tool", {})
         assert result["status"] == "ok"
+
+    def test_expected_trace_match_requires_full_trace(self):
+        router = MockToolRouter(EDIT_BEFORE_READ_SCENARIO)
+        router.call("read_file", {"file_path": "main.py"})
+        assert router.check_success() is False
+
+        router.call("edit_file", {"file_path": "main.py"})
+        assert router.check_success() is True
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +232,9 @@ class TestScenarioHarness:
             assert condition in stats
             assert "mean_composite" in stats[condition]
             assert "anti_pattern_rate" in stats[condition]
+            assert "correction_injection_rate" in stats[condition]
+            assert "mean_corrections_injected" in stats[condition]
+            assert "mean_rules_applied" in stats[condition]
             assert stats[condition]["n"] == 2
 
     def test_cannyforge_beats_baseline_on_corrected_agent(self, tmp_path):
@@ -307,3 +329,122 @@ class TestScenarioHarness:
         failure = engine.failure_repo.failures[0]
         assert failure.failure_class in {"WrongTool", "PrematureExit", "SequenceViolation"}
         assert failure.scenario_id == "test_edit_before_read"
+
+    def test_learning_checkpoint_preserves_domain_scoped_corrections(self, tmp_path):
+        run_dir = tmp_path / "run"
+
+        source_kb = KnowledgeBase(tmp_path / "source_learning")
+        source_kb.add_correction(
+            "tool_use",
+            Correction(
+                id="base-corr",
+                skill_name="tool_use",
+                error_type="FormatError",
+                content="Use the right args.",
+                source_errors=["err-base"],
+                created_at=1.0,
+            ),
+        )
+        source_kb.add_correction(
+            "tool_use_data",
+            Correction(
+                id="data-corr",
+                skill_name="tool_use_data",
+                error_type="WrongToolError",
+                content="Use the economic tool.",
+                source_errors=["err-data"],
+                created_at=2.0,
+            ),
+        )
+
+        _save_learning_checkpoint(run_dir, SimpleNamespace(knowledge_base=source_kb))
+
+        restored_kb = KnowledgeBase(tmp_path / "restored_learning")
+        loaded = _load_learning_checkpoint(run_dir, SimpleNamespace(knowledge_base=restored_kb))
+
+        assert loaded is True
+        assert [c.id for c in restored_kb.get_corrections("tool_use")] == ["base-corr"]
+        assert [c.id for c in restored_kb.get_corrections("tool_use_data")] == ["data-corr"]
+
+    def test_run_ablation_with_llm_paired_learns_from_matching_phase(self, tmp_path, monkeypatch):
+        self._write_scenarios(tmp_path)
+        harness = ScenarioHarness(str(tmp_path), domains=["coding"])
+        harness.scenarios = [EDIT_BEFORE_READ_SCENARIO]
+        harness._domain_prompts = {"coding": "Always read before editing."}
+
+        scenario_harness_mod = importlib.import_module("benchmark.scenario_harness")
+        langgraph_mod = importlib.import_module("cannyforge.adapters.langgraph")
+
+        class DummyKnowledgeBase:
+            def __init__(self):
+                self._corrections = {}
+
+            def get_corrections(self, skill_name):
+                return list(self._corrections.get(skill_name, []))
+
+            def list_skills(self):
+                return list(self._corrections.keys())
+
+            def add_correction(self, skill_name, correction):
+                self._corrections.setdefault(skill_name, []).append(correction)
+
+        class DummyForge:
+            def __init__(self, data_dir=None, skills_dir=None, llm_provider=None,
+                         async_learning=False, storage_backend="jsonl", metrics_callback=None):
+                self.data_dir = Path(data_dir) if data_dir is not None else tmp_path / "learning"
+                self.skills_dir = skills_dir
+                self.llm_provider = llm_provider
+                self._async_learning = async_learning
+                self.storage_backend_type = storage_backend
+                self.metrics_callback = metrics_callback
+                self.knowledge_base = DummyKnowledgeBase()
+
+        class DummyMiddleware:
+            def __init__(self, forge, skill_name="tool_use"):
+                self.forge = forge
+                self.skill_name = skill_name
+
+            def as_hooks(self):
+                return self.before_model, self.after_model
+
+            def before_model(self, state, runtime=None):
+                return {"messages": state.get("messages", [])}
+
+            def after_model(self, state, runtime=None):
+                return state
+
+            def finalize_task(self, success):
+                return None
+
+        class DummyRunner:
+            def __init__(self, llm, middleware=None, no_think=False,
+                         system_prompt="", domain_prompts=None, verbose=False):
+                self.middleware = middleware
+
+            def run(self, scenario, condition="baseline"):
+                return RunResult(
+                    scenario_id=scenario["id"],
+                    condition=condition,
+                    score=TraceScore(scenario_id=scenario["id"]),
+                    trace=[],
+                )
+
+        learn_inputs = []
+
+        def fake_learn(target_forge, results, skill_name, learning_llm=None):
+            learn_inputs.append([r.condition for r in results])
+            return 0
+
+        monkeypatch.setattr(scenario_harness_mod, "LLMScenarioRunner", DummyRunner)
+        monkeypatch.setattr(langgraph_mod, "CannyForgeMiddleware", DummyMiddleware)
+        monkeypatch.setattr(harness, "_learn_from_trace_failures", fake_learn)
+
+        results = harness.run_ablation_with_llm(
+            llm=object(),
+            forge=DummyForge(tmp_path / "learning_root"),
+            run_dir=tmp_path / "run",
+            learning_mode="paired",
+        )
+
+        assert set(results.keys()) == {"baseline", "static", "cannyforge", "static+cf"}
+        assert learn_inputs == [["baseline"], ["static"]]
