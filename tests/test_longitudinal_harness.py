@@ -6,6 +6,7 @@ from pathlib import Path
 from benchmark.longitudinal_harness import (
     REQUIRED_ARTIFACT_FILES,
     LongitudinalHarnessConfig,
+    run_cannyforge_online_longitudinal_harness,
     run_observer_longitudinal_harness,
     run_longitudinal_harness,
 )
@@ -217,3 +218,79 @@ def test_longitudinal_harness_cli_runs_observer_mode(tmp_path) -> None:
     assert output_payload["learning_cycle_count"] == 1
     assert output_payload["corrections_count"] >= 1
     assert (run_dir / "learning_cycles.jsonl").exists()
+
+
+def test_run_cannyforge_online_longitudinal_harness_applies_activation(tmp_path) -> None:
+    config = LongitudinalHarnessConfig(
+        stream_id="seed_stream",
+        warmup_count=1,
+        learning_count=1,
+        evaluation_count=1,
+        seed=5,
+        agent_model="gemini-2.5-flash-lite",
+        condition="cannyforge_online",
+        observer_min_frequency=1,
+    )
+    run_dir = tmp_path / "online_run"
+
+    run = run_cannyforge_online_longitudinal_harness(
+        config=config,
+        output_dir=run_dir,
+    )
+
+    assert run.artifact_dir == run_dir
+    assert len(run.learning_cycles) == 1
+    assert run.corrections_count >= 1
+    assert run.summary["overall"]["activation_rate"] >= 0.333
+    assert run.results[2].window == "evaluation"
+    assert run.results[2].correction_injected_count >= 1
+    assert run.results[2].effective_injection_count >= 1
+    assert run.results[2].task_succeeded is True
+
+    summary_payload = json.loads((run_dir / "summary.json").read_text())
+    activation_payload = json.loads((run_dir / "activation_summary.json").read_text())
+    event_lines = (run_dir / "events.jsonl").read_text().strip().splitlines()
+
+    assert summary_payload["config"]["condition"] == "cannyforge_online"
+    assert summary_payload["corrections_count"] >= 1
+    assert activation_payload["overall"]["activation_rate"] >= 0.333
+    assert any("activation_applied" in line for line in event_lines)
+
+
+def test_longitudinal_harness_cli_runs_online_mode(tmp_path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    run_dir = tmp_path / "online_cli_run"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "benchmark.longitudinal_harness",
+            "--condition",
+            "cannyforge_online",
+            "--observer-min-frequency",
+            "1",
+            "--output-dir",
+            str(run_dir),
+            "--warmup-count",
+            "1",
+            "--learning-count",
+            "1",
+            "--evaluation-count",
+            "1",
+            "--seed",
+            "5",
+            "--model",
+            "gemini-2.5-flash-lite",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output_payload = json.loads(completed.stdout)
+    assert output_payload["learning_cycle_count"] == 1
+    assert output_payload["corrections_count"] >= 1
+    assert output_payload["summary"]["overall"]["activation_rate"] >= 0.333
+    assert (run_dir / "activation_summary.json").exists()

@@ -303,6 +303,66 @@ def run_observer_longitudinal_harness(
     )
 
 
+def run_cannyforge_online_longitudinal_harness(
+    *,
+    config: LongitudinalHarnessConfig,
+    output_dir: str | Path | None = None,
+) -> LongitudinalHarnessRun:
+    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
+    from benchmark.longitudinal_observer import apply_cannyforge_online_integration
+
+    records = load_task_family_records(config.dataset_path)
+    executor = DeterministicBaselineExecutor(records)
+    plan = build_episode_plan(
+        records,
+        stream_id=config.stream_id,
+        warmup_count=config.warmup_count,
+        learning_count=config.learning_count,
+        evaluation_count=config.evaluation_count,
+        seed=config.seed,
+    )
+    baseline_results = run_episode_plan(
+        plan,
+        executor=executor,
+        agent_model=config.agent_model,
+        condition="baseline",
+    )
+    online_data_dir = Path(output_dir) / "learning_state" if output_dir is not None else None
+    online_result = apply_cannyforge_online_integration(
+        results=baseline_results,
+        records=records,
+        data_dir=online_data_dir,
+        min_frequency=config.observer_min_frequency,
+        min_confidence=config.observer_min_confidence,
+    )
+    results = list(online_result.results)
+    summary = summarize_episode_results(results)
+
+    artifact_dir = None
+    if output_dir is not None:
+        artifact_dir = write_run_artifacts(
+            output_dir=output_dir,
+            config=config,
+            plan=plan,
+            results=results,
+            summary=summary,
+            events=list(online_result.events),
+            learning_cycles=list(online_result.learning_cycles),
+            corrections_count=online_result.corrections_count,
+        )
+
+    return LongitudinalHarnessRun(
+        config=config,
+        plan=tuple(plan),
+        results=tuple(results),
+        summary=summary,
+        events=online_result.events,
+        learning_cycles=online_result.learning_cycles,
+        corrections_count=online_result.corrections_count,
+        artifact_dir=artifact_dir,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Longitudinal benchmark harness")
     parser.add_argument(
@@ -323,7 +383,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="unknown-model", help="Agent model label")
     parser.add_argument(
         "--condition",
-        choices=["baseline", "observer_only"],
+        choices=["baseline", "observer_only", "cannyforge_online"],
         default="baseline",
         help="Harness condition to execute",
     )
@@ -372,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         run = run_baseline_longitudinal_harness(config=config, output_dir=output_dir)
     elif args.condition == "observer_only":
         run = run_observer_longitudinal_harness(config=config, output_dir=output_dir)
+    elif args.condition == "cannyforge_online":
+        run = run_cannyforge_online_longitudinal_harness(config=config, output_dir=output_dir)
     else:
         parser.error(f"Unsupported condition: {args.condition}")
 
