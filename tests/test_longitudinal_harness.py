@@ -7,6 +7,7 @@ from benchmark.longitudinal_harness import (
     REQUIRED_ARTIFACT_FILES,
     LongitudinalHarnessConfig,
     run_cannyforge_online_longitudinal_harness,
+    run_longitudinal_condition_suite,
     run_observer_longitudinal_harness,
     run_longitudinal_harness,
 )
@@ -294,3 +295,69 @@ def test_longitudinal_harness_cli_runs_online_mode(tmp_path) -> None:
     assert output_payload["corrections_count"] >= 1
     assert output_payload["summary"]["overall"]["activation_rate"] >= 0.333
     assert (run_dir / "activation_summary.json").exists()
+
+
+def test_run_longitudinal_condition_suite_writes_suite_summary(tmp_path) -> None:
+    config = LongitudinalHarnessConfig(
+        stream_id="seed_stream",
+        warmup_count=1,
+        learning_count=1,
+        evaluation_count=1,
+        seed=5,
+        agent_model="gemini-2.5-flash-lite",
+        observer_min_frequency=1,
+    )
+    suite_dir = tmp_path / "suite_run"
+
+    suite = run_longitudinal_condition_suite(
+        config=config,
+        output_dir=suite_dir,
+    )
+
+    assert suite.artifact_dir == suite_dir
+    assert set(suite.condition_runs) == {"baseline", "observer_only", "cannyforge_online"}
+    assert (suite_dir / "suite_summary.json").exists()
+    assert (suite_dir / "baseline" / "summary.json").exists()
+    assert (suite_dir / "observer_only" / "summary.json").exists()
+    assert (suite_dir / "cannyforge_online" / "summary.json").exists()
+
+    suite_summary = json.loads((suite_dir / "suite_summary.json").read_text())
+    assert "conditions" in suite_summary
+    assert "evaluation_delta_vs_baseline" in suite_summary["conditions"]["observer_only"]
+    assert suite_summary["conditions"]["cannyforge_online"]["corrections_count"] >= 1
+
+
+def test_longitudinal_harness_cli_runs_all_conditions_suite(tmp_path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    suite_dir = tmp_path / "suite_cli_run"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "benchmark.longitudinal_harness",
+            "--all-conditions",
+            "--observer-min-frequency",
+            "1",
+            "--output-dir",
+            str(suite_dir),
+            "--warmup-count",
+            "1",
+            "--learning-count",
+            "1",
+            "--evaluation-count",
+            "1",
+            "--seed",
+            "5",
+            "--model",
+            "gemini-2.5-flash-lite",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output_payload = json.loads(completed.stdout)
+    assert set(output_payload["conditions"]) == {"baseline", "observer_only", "cannyforge_online"}
+    assert (suite_dir / "suite_summary.json").exists()

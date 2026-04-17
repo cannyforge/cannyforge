@@ -25,6 +25,7 @@ REQUIRED_ARTIFACT_FILES = (
     "learning_cycles.jsonl",
     "activation_summary.json",
 )
+DEFAULT_CONDITIONS = ("baseline", "observer_only", "cannyforge_online")
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,14 @@ class LongitudinalHarnessRun:
     events: tuple[dict[str, Any], ...] = ()
     learning_cycles: tuple[dict[str, Any], ...] = ()
     corrections_count: int = 0
+    artifact_dir: Optional[Path] = None
+
+
+@dataclass(frozen=True)
+class LongitudinalHarnessSuiteRun:
+    config: LongitudinalHarnessConfig
+    condition_runs: dict[str, LongitudinalHarnessRun]
+    summary: dict[str, Any]
     artifact_dir: Optional[Path] = None
 
 
@@ -172,6 +181,84 @@ def write_run_artifacts(
     )
 
     return run_dir
+
+
+def _condition_suite_summary(
+    condition_runs: dict[str, LongitudinalHarnessRun],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {"conditions": {}}
+    baseline_evaluation = (
+        condition_runs.get("baseline").summary["by_window"].get("evaluation", {})
+        if "baseline" in condition_runs
+        else {}
+    )
+
+    for condition, run in condition_runs.items():
+        evaluation_metrics = run.summary["by_window"].get("evaluation", {})
+        summary["conditions"][condition] = {
+            "overall": run.summary["overall"],
+            "evaluation": evaluation_metrics,
+            "learning_cycle_count": len(run.learning_cycles),
+            "corrections_count": run.corrections_count,
+        }
+        if condition != "baseline" and baseline_evaluation:
+            summary["conditions"][condition]["evaluation_delta_vs_baseline"] = {
+                "success_rate": round(
+                    evaluation_metrics.get("success_rate", 0.0)
+                    - baseline_evaluation.get("success_rate", 0.0),
+                    3,
+                ),
+                "mean_retries": round(
+                    evaluation_metrics.get("mean_retries", 0.0)
+                    - baseline_evaluation.get("mean_retries", 0.0),
+                    3,
+                ),
+                "mean_turns": round(
+                    evaluation_metrics.get("mean_turns", 0.0)
+                    - baseline_evaluation.get("mean_turns", 0.0),
+                    3,
+                ),
+                "mean_tokens_total": round(
+                    evaluation_metrics.get("mean_tokens_total", 0.0)
+                    - baseline_evaluation.get("mean_tokens_total", 0.0),
+                    3,
+                ),
+                "mean_latency_ms": round(
+                    evaluation_metrics.get("mean_latency_ms", 0.0)
+                    - baseline_evaluation.get("mean_latency_ms", 0.0),
+                    3,
+                ),
+                "activation_rate": round(
+                    evaluation_metrics.get("activation_rate", 0.0)
+                    - baseline_evaluation.get("activation_rate", 0.0),
+                    3,
+                ),
+            }
+
+    return summary
+
+
+def write_suite_artifacts(
+    *,
+    output_dir: str | Path,
+    config: LongitudinalHarnessConfig,
+    condition_runs: dict[str, LongitudinalHarnessRun],
+) -> Path:
+    suite_dir = Path(output_dir)
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    suite_summary = _condition_suite_summary(condition_runs)
+    (suite_dir / "suite_summary.json").write_text(
+        json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "config": asdict(config),
+                **suite_summary,
+            },
+            indent=2,
+            default=_json_default,
+        )
+    )
+    return suite_dir
 
 
 def run_longitudinal_harness(
@@ -363,6 +450,58 @@ def run_cannyforge_online_longitudinal_harness(
     )
 
 
+def run_longitudinal_condition_suite(
+    *,
+    config: LongitudinalHarnessConfig,
+    conditions: tuple[str, ...] = DEFAULT_CONDITIONS,
+    output_dir: str | Path | None = None,
+) -> LongitudinalHarnessSuiteRun:
+    runners = {
+        "baseline": run_baseline_longitudinal_harness,
+        "observer_only": run_observer_longitudinal_harness,
+        "cannyforge_online": run_cannyforge_online_longitudinal_harness,
+    }
+    condition_runs: dict[str, LongitudinalHarnessRun] = {}
+    suite_dir = Path(output_dir) if output_dir is not None else None
+
+    for condition in conditions:
+        if condition not in runners:
+            raise ValueError(f"Unsupported suite condition: {condition}")
+        condition_config = LongitudinalHarnessConfig(
+            dataset_path=config.dataset_path,
+            stream_id=config.stream_id,
+            warmup_count=config.warmup_count,
+            learning_count=config.learning_count,
+            evaluation_count=config.evaluation_count,
+            seed=config.seed,
+            agent_model=config.agent_model,
+            condition=condition,
+            observer_min_frequency=config.observer_min_frequency,
+            observer_min_confidence=config.observer_min_confidence,
+        )
+        condition_output_dir = suite_dir / condition if suite_dir is not None else None
+        condition_runs[condition] = runners[condition](
+            config=condition_config,
+            output_dir=condition_output_dir,
+        )
+
+    summary = _condition_suite_summary(condition_runs)
+    artifact_dir = None
+    if suite_dir is not None:
+        artifact_dir = write_suite_artifacts(
+            output_dir=suite_dir,
+            config=config,
+            condition_runs=condition_runs,
+        )
+
+    return LongitudinalHarnessSuiteRun(
+        config=config,
+        condition_runs=condition_runs,
+        summary=summary,
+        artifact_dir=artifact_dir,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Longitudinal benchmark harness")
     parser.add_argument(
@@ -404,6 +543,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for benchmark artifacts (default: timestamped path under benchmark/results)",
     )
+    parser.add_argument(
+        "--all-conditions",
+        action="store_true",
+        help="Run baseline, observer_only, and cannyforge_online as a single suite",
+    )
     return parser
 
 
@@ -424,9 +568,25 @@ def main(argv: list[str] | None = None) -> int:
         observer_min_confidence=args.observer_min_confidence,
     )
 
-    output_dir = Path(args.output_dir) if args.output_dir else (
-        RESULTS_DIR / f"run_longitudinal_{args.condition}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    default_name = (
+        f"run_longitudinal_suite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        if args.all_conditions
+        else f"run_longitudinal_{args.condition}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     )
+    output_dir = Path(args.output_dir) if args.output_dir else (RESULTS_DIR / default_name)
+
+    if args.all_conditions:
+        suite = run_longitudinal_condition_suite(config=config, output_dir=output_dir)
+        print(
+            json.dumps(
+                {
+                    "artifact_dir": str(suite.artifact_dir),
+                    **suite.summary,
+                },
+                indent=2,
+            )
+        )
+        return 0
 
     if args.condition == "baseline":
         run = run_baseline_longitudinal_harness(config=config, output_dir=output_dir)
