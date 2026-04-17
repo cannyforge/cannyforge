@@ -22,6 +22,11 @@ The product claim is:
 
 This spec defines that benchmark.
 
+Canonical schema artifacts live in:
+
+- `benchmark/schema/longitudinal_task_family.schema.json`
+- `benchmark/schema/longitudinal_episode.schema.json`
+
 ## 2. Benchmark Taxonomy
 
 We should keep two benchmark families.
@@ -182,6 +187,259 @@ Within a cluster, keep constant:
 - tool semantics
 - recovery expectation
 - scoring contract
+
+## 7.4 Schema lineage from FSI80
+
+Yes, the right next step is to continue the FSI80 story into the real benchmark schema.
+
+But we should not copy `fsi80_tasks.json` forward unchanged.
+
+FSI80 solved the v0.3 problem well because it gave us a compact task schema for:
+
+- held-out splits
+- confusion pairs
+- expected tool choice
+- expected argument fragments
+- expected sequences for multi-step cases
+- coarse error-mode buckets
+
+That is the correct ancestor for the new harness.
+
+What changes in the longitudinal benchmark is the unit of evaluation.
+
+In FSI80, one JSON row was effectively both:
+
+- the task definition
+- the evaluation unit
+
+In the new harness, those need to be split.
+
+### 7.4.1 Keep FSI80 as the task-family layer
+
+The FSI80-style schema should evolve into a reusable task-family definition format.
+
+That layer should answer:
+
+- what kind of task is this
+- what failure family is it meant to exercise
+- what tools and ordering matter
+- what argument semantics matter
+- what variants belong to the same transferable pattern cluster
+
+Recommended inherited fields:
+
+- `id`
+- `domain`
+- `difficulty`
+- `expected_sequence`
+- `expected_arg_contains`
+- `failure_family`
+- `distractor_tools`
+- `task_family`
+- `variant_group`
+
+Recommended field mapping from FSI80:
+
+- `set` -> `window_role` or dataset split metadata
+- `confusion_pair` -> `task_family` or `transfer_cluster`
+- `confusable_with` -> `distractor_tools`
+- `expected` -> keep only for single-step tasks, not as the primary field
+- `error_mode` -> `failure_family`
+
+### 7.4.2 Add a new episode-stream layer
+
+The new harness then needs a second schema for actual benchmark execution records.
+
+That layer should answer:
+
+- when this task appeared in the stream
+- what state the agent saw
+- what happened during execution
+- whether CannyForge had relevant learned artifacts available
+- whether anything activated
+- what the cost and outcome were
+
+This layer should contain episode-specific runtime fields such as:
+
+- `episode_id`
+- `stream_id`
+- `window`
+- `condition`
+- `task_family`
+- `task_variant_id`
+- `environment_state`
+- `num_turns`
+- `num_tool_calls`
+- `num_retries`
+- `tokens_total`
+- `latency_ms`
+- `task_succeeded`
+- `correction_injected_count`
+- `rules_applied_count`
+- `failure_classes_observed`
+
+### 7.4.3 What not to carry forward literally
+
+We should not let the new schema remain anchored on a single `expected` tool field.
+
+That was correct for the original tool-selection benchmark, but it is too narrow for the real product loop.
+
+For the longitudinal harness, the primary schema should be built around:
+
+- expected completion outcome
+- expected dependency sequence
+- expected recovery behavior
+- cost-relevant execution statistics
+
+So the answer is:
+
+- yes, FSI80 should directly shape the new schema
+- no, the real benchmark should not just be a larger `fsi80_tasks.json`
+
+It should be the next layer up: FSI80 task-family semantics plus a first-class episode-stream schema.
+
+### 7.4.4 Proposed task-family schema
+
+The task-family schema should define the reusable benchmark pattern, not one concrete run.
+
+Example:
+
+```json
+{
+	"task_family": "portfolio_prereq_then_action",
+	"variant_id": "fsi_c05",
+	"domain": "fsi",
+	"difficulty": "hard",
+	"window_role": "learn",
+	"transfer_cluster": "compliance_before_trade",
+	"failure_family": "missing_prerequisite",
+	"user_request": "Check whether adding NVDA to PVT-2209 is allowed and if so execute the purchase",
+	"expected_outcome": {
+		"success_type": "completed_workflow",
+		"required_tools": [
+			"fetch_client_portfolio",
+			"run_compliance_check",
+			"execute_trade"
+		]
+	},
+	"expected_sequence": [
+		"fetch_client_portfolio",
+		"run_compliance_check",
+		"execute_trade"
+	],
+	"expected_arg_contains": {
+		"run_compliance_check": {
+			"symbol": "NVDA"
+		}
+	},
+	"distractor_tools": [
+		"execute_trade"
+	],
+	"environment_template": {
+		"account_id": "PVT-2209",
+		"symbol": "NVDA"
+	},
+	"scoring_contract": {
+		"sequence_required": true,
+		"recovery_allowed": true,
+		"max_reasonable_tool_calls": 4
+	}
+}
+```
+
+Why each field exists:
+
+- `task_family`: primary reusable pattern identifier. This is the key grouping for learning transfer and reporting.
+- `variant_id`: unique row identity. Needed so multiple paraphrases can live under one family without collapsing into one sample.
+- `domain`: keeps routing, tool registry, and later reporting sliceable.
+- `difficulty`: preserves the FSI80 lesson that improvements should be checked by task hardness, not just globally.
+- `window_role`: replaces FSI80 `set` more explicitly. The field exists because stream placement matters to interpretation.
+- `transfer_cluster`: successor to `confusion_pair`. It defines the repeated pattern that later tasks should benefit from.
+- `failure_family`: bounded label for what the task is meant to expose. Needed for benchmark design and by-family reporting.
+- `user_request`: canonical task text for generation and replay.
+- `expected_outcome`: required because single-tool expectation is too weak for real workflows. This is the real success target.
+- `expected_sequence`: required when order matters. Without it, prerequisite and workflow failures disappear into partial-credit noise.
+- `expected_arg_contains`: keeps the useful FSI80 argument semantics, but scoped to tool names rather than a flat row.
+- `distractor_tools`: explicit negative pressure. This is why transfer remains meaningful instead of becoming answer memorization.
+- `environment_template`: lets the same family be rendered with variant state while keeping semantics fixed.
+- `scoring_contract`: makes benchmark assumptions explicit rather than hidden in evaluator code.
+
+### 7.4.5 Proposed episode-stream schema
+
+The episode schema should describe one actual execution in the longitudinal harness.
+
+Example:
+
+```json
+{
+	"episode_id": "ep_20260416_0042",
+	"stream_id": "fsi_longitudinal_seed_7",
+	"window": "evaluation",
+	"condition": "cannyforge_online",
+	"task_family": "portfolio_prereq_then_action",
+	"task_variant_id": "fsi_c05",
+	"domain": "fsi",
+	"agent_model": "gemini-2.5-flash-lite",
+	"environment_state": {
+		"account_id": "PVT-2209",
+		"symbol": "NVDA"
+	},
+	"task_succeeded": true,
+	"final_outcome": "completed_workflow",
+	"num_model_turns": 4,
+	"num_tool_calls": 3,
+	"num_failed_tool_calls": 0,
+	"num_retries": 0,
+	"tokens_prompt": 1320,
+	"tokens_completion": 288,
+	"tokens_total": 1608,
+	"latency_ms": 4820,
+	"learning_artifacts_available": 3,
+	"correction_injected_count": 1,
+	"rules_applied_count": 1,
+	"effective_injection_count": 1,
+	"failure_classes_observed": [],
+	"score": {
+		"sequence_correct": true,
+		"arg_quality": 1.0,
+		"efficiency": 1.0
+	}
+}
+```
+
+Why each field exists:
+
+- `episode_id`: immutable execution identity. Needed for event-log joins and debugging.
+- `stream_id`: groups all episodes belonging to one benchmark run.
+- `window`: tells us whether the episode is warmup, learning, or evaluation. This is necessary because the same task result means different things in different windows.
+- `condition`: benchmark comparator identity. Required for all analysis.
+- `task_family`: links runtime effect back to the reusable pattern we care about.
+- `task_variant_id`: prevents loss of per-task granularity inside a family.
+- `domain`: keeps later breakdowns cheap and explicit.
+- `agent_model`: needed because model changes must be separable from system changes.
+- `environment_state`: records the concrete state the agent saw. Required for replay and for understanding context-sensitive failures.
+- `task_succeeded`: the primary outcome bit.
+- `final_outcome`: richer outcome label than a bare boolean. Useful for partial completion and recovery analysis.
+- `num_model_turns`: direct proxy for reasoning loop cost.
+- `num_tool_calls`: measures execution cost.
+- `num_failed_tool_calls`: exposes low-quality attempts even when the episode eventually succeeds.
+- `num_retries`: one of the core product metrics; should go down if CannyForge is helping.
+- `tokens_prompt`, `tokens_completion`, `tokens_total`: necessary because token savings are part of the product claim.
+- `latency_ms`: required because a lower-retry system should also converge faster.
+- `learning_artifacts_available`: separates no-benefit-because-nothing-was-learned from no-benefit-despite-learning.
+- `correction_injected_count`: minimum activation signal.
+- `rules_applied_count`: separates prompt-injection effect from rule-based effect.
+- `effective_injection_count`: prevents activation metrics from becoming vanity metrics.
+- `failure_classes_observed`: records what went wrong in this episode, even if the episode later recovered.
+- `score`: optional diagnostic sub-score block. Useful for debugging, but not the primary benchmark headline.
+
+### 7.4.6 Tight design rule
+
+Every field in these schemas should survive one question:
+
+- does this field change benchmark interpretation, learning transfer analysis, or replay/debuggability
+
+If the answer is no, the field should not be in v1.
 
 ## 8. Agent Model
 

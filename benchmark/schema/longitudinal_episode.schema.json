@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cannyforge.dev/schema/longitudinal_episode.schema.json",
+  "title": "CannyForge Longitudinal Episode",
+  "description": "Runtime execution record for one episode in the longitudinal benchmark harness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "episode_id",
+    "stream_id",
+    "window",
+    "condition",
+    "task_family",
+    "task_variant_id",
+    "domain",
+    "agent_model",
+    "environment_state",
+    "task_succeeded",
+    "final_outcome",
+    "num_model_turns",
+    "num_tool_calls",
+    "num_failed_tool_calls",
+    "num_retries",
+    "tokens_prompt",
+    "tokens_completion",
+    "tokens_total",
+    "latency_ms",
+    "learning_artifacts_available",
+    "correction_injected_count",
+    "rules_applied_count",
+    "effective_injection_count",
+    "failure_classes_observed"
+  ],
+  "properties": {
+    "episode_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stream_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "window": {
+      "type": "string",
+      "enum": [
+        "warmup",
+        "learning",
+        "evaluation"
+      ]
+    },
+    "condition": {
+      "type": "string",
+      "enum": [
+        "baseline",
+        "observer_only",
+        "cannyforge_online",
+        "static",
+        "static_plus_cannyforge"
+      ]
+    },
+    "task_family": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_variant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "environment_state": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "task_succeeded": {
+      "type": "boolean"
+    },
+    "final_outcome": {
+      "type": "string",
+      "minLength": 1
+    },
+    "num_model_turns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "num_tool_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "num_failed_tool_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "num_retries": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tokens_prompt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tokens_completion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tokens_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "latency_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "learning_artifacts_available": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "correction_injected_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rules_applied_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "effective_injection_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failure_classes_observed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "integer",
+          "boolean"
+        ]
+      },
+      "description": "Optional diagnostic score block."
+    }
+  }
+}
