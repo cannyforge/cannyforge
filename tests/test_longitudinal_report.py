@@ -26,6 +26,10 @@ def test_build_report_from_suite_artifacts(tmp_path) -> None:
     assert "Evaluation Summary" in report_md
     assert "Representative Wins" in report_md
     assert "Representative Failures" in report_md
+    assert report_md.count("# Representative Wins") == 0
+    assert report_md.count("# Representative Failures") == 0
+    assert report_md.count("## 3. Representative Wins") == 1
+    assert report_md.count("## 4. Representative Failures") == 1
 
 
 def test_longitudinal_report_cli_generates_markdown(tmp_path) -> None:

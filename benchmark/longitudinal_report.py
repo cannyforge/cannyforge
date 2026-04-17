@@ -20,6 +20,17 @@ def _read_optional_text(path: Path) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
+def _strip_leading_heading(text: str, heading: str) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if lines and lines[0].strip() == f"# {heading}":
+        lines = lines[1:]
+        if lines and not lines[0].strip():
+            lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
 def build_report(run_dir: Path, suite_summary: dict[str, Any]) -> str:
     lines: list[str] = []
 
@@ -62,10 +73,10 @@ def build_report(run_dir: Path, suite_summary: dict[str, Any]) -> str:
     failures_text = _read_optional_text(run_dir / "representative_failures.md")
     if wins_text:
         h(2, "3. Representative Wins")
-        lines.append(wins_text)
+        lines.append(_strip_leading_heading(wins_text, "Representative Wins"))
     if failures_text:
         h(2, "4. Representative Failures")
-        lines.append(failures_text)
+        lines.append(_strip_leading_heading(failures_text, "Representative Failures"))
 
     return "\n".join(lines).strip() + "\n"
 
