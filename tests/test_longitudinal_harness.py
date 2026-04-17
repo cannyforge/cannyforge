@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from benchmark.longitudinal_harness import (
     REQUIRED_ARTIFACT_FILES,
@@ -105,3 +108,36 @@ def test_run_longitudinal_harness_writes_required_artifacts(tmp_path) -> None:
     assert activation_payload["overall"]["activation_rate"] == 0.667
     assert by_domain_payload["fsi"]["n"] == 3
     assert by_failure_payload["missing_prerequisite"]["n"] == 1
+
+
+def test_longitudinal_harness_cli_runs_baseline_mode(tmp_path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    run_dir = tmp_path / "cli_run"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "benchmark.longitudinal_harness",
+            "--output-dir",
+            str(run_dir),
+            "--warmup-count",
+            "1",
+            "--learning-count",
+            "1",
+            "--evaluation-count",
+            "1",
+            "--seed",
+            "5",
+            "--model",
+            "gemini-2.5-flash-lite",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output_payload = json.loads(completed.stdout)
+    assert output_payload["summary"]["overall"]["n"] == 3
+    assert (run_dir / "summary.json").exists()

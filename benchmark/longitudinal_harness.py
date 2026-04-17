@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -218,3 +219,74 @@ def run_baseline_longitudinal_harness(
         output_dir=output_dir,
         records=records,
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Longitudinal benchmark harness")
+    parser.add_argument(
+        "--dataset-path",
+        default=str(DEFAULT_TASK_FAMILY_DATASET),
+        help="Task family dataset path",
+    )
+    parser.add_argument("--stream-id", default="longitudinal_seed", help="Stream identifier")
+    parser.add_argument("--warmup-count", type=int, default=10, help="Warmup window size")
+    parser.add_argument("--learning-count", type=int, default=40, help="Learning window size")
+    parser.add_argument(
+        "--evaluation-count",
+        type=int,
+        default=50,
+        help="Evaluation window size",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Deterministic plan seed")
+    parser.add_argument("--model", default="unknown-model", help="Agent model label")
+    parser.add_argument(
+        "--condition",
+        choices=["baseline"],
+        default="baseline",
+        help="Harness condition to execute",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for benchmark artifacts (default: timestamped path under benchmark/results)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    config = LongitudinalHarnessConfig(
+        dataset_path=args.dataset_path,
+        stream_id=args.stream_id,
+        warmup_count=args.warmup_count,
+        learning_count=args.learning_count,
+        evaluation_count=args.evaluation_count,
+        seed=args.seed,
+        agent_model=args.model,
+        condition=args.condition,
+    )
+
+    output_dir = Path(args.output_dir) if args.output_dir else (
+        RESULTS_DIR / f"run_longitudinal_{args.condition}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    )
+
+    if args.condition != "baseline":
+        parser.error(f"Unsupported condition: {args.condition}")
+
+    run = run_baseline_longitudinal_harness(config=config, output_dir=output_dir)
+    print(
+        json.dumps(
+            {
+                "artifact_dir": str(run.artifact_dir),
+                "summary": run.summary,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
