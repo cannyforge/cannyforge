@@ -320,6 +320,8 @@ def test_run_longitudinal_condition_suite_writes_suite_summary(tmp_path) -> None
     assert (suite_dir / "suite_summary.json").exists()
     assert (suite_dir / "cost_curves.csv").exists()
     assert (suite_dir / "window_comparison.csv").exists()
+    assert (suite_dir / "representative_wins.md").exists()
+    assert (suite_dir / "representative_failures.md").exists()
     assert (suite_dir / "baseline" / "summary.json").exists()
     assert (suite_dir / "observer_only" / "summary.json").exists()
     assert (suite_dir / "cannyforge_online" / "summary.json").exists()
@@ -337,6 +339,10 @@ def test_run_longitudinal_condition_suite_writes_suite_summary(tmp_path) -> None
     assert {row["condition"] for row in window_rows} == {"baseline", "observer_only", "cannyforge_online"}
     online_row = next(row for row in window_rows if row["condition"] == "cannyforge_online")
     assert float(online_row["delta_activation_rate_vs_baseline"]) >= 0.333
+    wins_text = (suite_dir / "representative_wins.md").read_text()
+    failures_text = (suite_dir / "representative_failures.md").read_text()
+    assert "Representative Wins" in wins_text
+    assert "Representative Failures" in failures_text
 
 
 def test_longitudinal_harness_cli_runs_all_conditions_suite(tmp_path) -> None:
@@ -375,3 +381,5 @@ def test_longitudinal_harness_cli_runs_all_conditions_suite(tmp_path) -> None:
     assert (suite_dir / "suite_summary.json").exists()
     assert (suite_dir / "cost_curves.csv").exists()
     assert (suite_dir / "window_comparison.csv").exists()
+    assert (suite_dir / "representative_wins.md").exists()
+    assert (suite_dir / "representative_failures.md").exists()

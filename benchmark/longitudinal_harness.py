@@ -350,6 +350,107 @@ def write_suite_artifacts(
         writer.writeheader()
         writer.writerows(window_comparison_rows)
 
+    baseline_results = {
+        result.episode_id: result
+        for result in condition_runs.get("baseline", LongitudinalHarnessRun(config, (), (), {})).results
+    }
+    online_results = list(condition_runs.get("cannyforge_online", LongitudinalHarnessRun(config, (), (), {})).results)
+
+    representative_wins: list[dict[str, Any]] = []
+    representative_failures: list[dict[str, Any]] = []
+    for result in online_results:
+        baseline_result = baseline_results.get(result.episode_id)
+        if baseline_result is None:
+            continue
+
+        if (
+            (not baseline_result.task_succeeded and result.task_succeeded)
+            or result.num_retries < baseline_result.num_retries
+            or result.tokens_total < baseline_result.tokens_total
+            or result.latency_ms < baseline_result.latency_ms
+        ):
+            representative_wins.append(
+                {
+                    "episode_id": result.episode_id,
+                    "task_family": result.task_family,
+                    "window": result.window,
+                    "baseline_success": baseline_result.task_succeeded,
+                    "online_success": result.task_succeeded,
+                    "baseline_retries": baseline_result.num_retries,
+                    "online_retries": result.num_retries,
+                    "baseline_tokens_total": baseline_result.tokens_total,
+                    "online_tokens_total": result.tokens_total,
+                    "baseline_latency_ms": baseline_result.latency_ms,
+                    "online_latency_ms": result.latency_ms,
+                    "corrections_injected": result.correction_injected_count,
+                    "rules_applied": result.rules_applied_count,
+                }
+            )
+
+        if not result.task_succeeded:
+            representative_failures.append(
+                {
+                    "episode_id": result.episode_id,
+                    "task_family": result.task_family,
+                    "window": result.window,
+                    "final_outcome": result.final_outcome,
+                    "failure_classes_observed": list(result.failure_classes_observed),
+                    "retries": result.num_retries,
+                    "tokens_total": result.tokens_total,
+                    "latency_ms": result.latency_ms,
+                    "corrections_injected": result.correction_injected_count,
+                    "rules_applied": result.rules_applied_count,
+                }
+            )
+
+    representative_wins = sorted(
+        representative_wins,
+        key=lambda row: (
+            int(not row["baseline_success"] and row["online_success"]),
+            row["baseline_retries"] - row["online_retries"],
+            row["baseline_tokens_total"] - row["online_tokens_total"],
+        ),
+        reverse=True,
+    )[:10]
+    representative_failures = sorted(
+        representative_failures,
+        key=lambda row: (row["window"], row["retries"], row["tokens_total"]),
+        reverse=True,
+    )[:10]
+
+    wins_lines = ["# Representative Wins", ""]
+    if representative_wins:
+        wins_lines.extend(
+            [
+                "| Episode | Family | Window | Base success | Online success | Base retries | Online retries | Base tokens | Online tokens | Base latency ms | Online latency ms | Corr | Rules |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for row in representative_wins:
+            wins_lines.append(
+                f"| {row['episode_id']} | {row['task_family']} | {row['window']} | {row['baseline_success']} | {row['online_success']} | {row['baseline_retries']} | {row['online_retries']} | {row['baseline_tokens_total']} | {row['online_tokens_total']} | {row['baseline_latency_ms']:.1f} | {row['online_latency_ms']:.1f} | {row['corrections_injected']} | {row['rules_applied']} |"
+            )
+    else:
+        wins_lines.append("_No representative wins identified._")
+
+    failures_lines = ["# Representative Failures", ""]
+    if representative_failures:
+        failures_lines.extend(
+            [
+                "| Episode | Family | Window | Outcome | Failure classes | Retries | Tokens | Latency ms | Corr | Rules |",
+                "|---|---|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for row in representative_failures:
+            failures_lines.append(
+                f"| {row['episode_id']} | {row['task_family']} | {row['window']} | {row['final_outcome']} | {', '.join(row['failure_classes_observed']) or '—'} | {row['retries']} | {row['tokens_total']} | {row['latency_ms']:.1f} | {row['corrections_injected']} | {row['rules_applied']} |"
+            )
+    else:
+        failures_lines.append("_No representative failures identified._")
+
+    (suite_dir / "representative_wins.md").write_text("\n".join(wins_lines) + "\n")
+    (suite_dir / "representative_failures.md").write_text("\n".join(failures_lines) + "\n")
+
     (suite_dir / "suite_summary.json").write_text(
         json.dumps(
             {
