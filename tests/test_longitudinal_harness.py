@@ -6,6 +6,7 @@ from pathlib import Path
 from benchmark.longitudinal_harness import (
     REQUIRED_ARTIFACT_FILES,
     LongitudinalHarnessConfig,
+    run_observer_longitudinal_harness,
     run_longitudinal_harness,
 )
 
@@ -141,3 +142,78 @@ def test_longitudinal_harness_cli_runs_baseline_mode(tmp_path) -> None:
     output_payload = json.loads(completed.stdout)
     assert output_payload["summary"]["overall"]["n"] == 3
     assert (run_dir / "summary.json").exists()
+
+
+def test_run_observer_longitudinal_harness_records_learning_cycles(tmp_path) -> None:
+    config = LongitudinalHarnessConfig(
+        stream_id="seed_stream",
+        warmup_count=1,
+        learning_count=1,
+        evaluation_count=1,
+        seed=5,
+        agent_model="gemini-2.5-flash-lite",
+        condition="observer_only",
+        observer_min_frequency=1,
+    )
+    run_dir = tmp_path / "observer_run"
+
+    run = run_observer_longitudinal_harness(
+        config=config,
+        output_dir=run_dir,
+    )
+
+    assert run.artifact_dir == run_dir
+    assert len(run.learning_cycles) == 1
+    assert run.corrections_count >= 1
+    assert len(run.events) >= 3
+    assert run.results[2].window == "evaluation"
+    assert run.results[2].learning_artifacts_available >= 1
+    assert run.results[2].correction_injected_count == 0
+
+    summary_payload = json.loads((run_dir / "summary.json").read_text())
+    learning_cycle_lines = (run_dir / "learning_cycles.jsonl").read_text().strip().splitlines()
+    event_lines = (run_dir / "events.jsonl").read_text().strip().splitlines()
+
+    assert summary_payload["config"]["condition"] == "observer_only"
+    assert summary_payload["learning_cycle_count"] == 1
+    assert summary_payload["corrections_count"] >= 1
+    assert len(learning_cycle_lines) == 1
+    assert len(event_lines) >= 3
+
+
+def test_longitudinal_harness_cli_runs_observer_mode(tmp_path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    run_dir = tmp_path / "observer_cli_run"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "benchmark.longitudinal_harness",
+            "--condition",
+            "observer_only",
+            "--observer-min-frequency",
+            "1",
+            "--output-dir",
+            str(run_dir),
+            "--warmup-count",
+            "1",
+            "--learning-count",
+            "1",
+            "--evaluation-count",
+            "1",
+            "--seed",
+            "5",
+            "--model",
+            "gemini-2.5-flash-lite",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output_payload = json.loads(completed.stdout)
+    assert output_payload["learning_cycle_count"] == 1
+    assert output_payload["corrections_count"] >= 1
+    assert (run_dir / "learning_cycles.jsonl").exists()

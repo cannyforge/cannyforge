@@ -37,6 +37,8 @@ class LongitudinalHarnessConfig:
     seed: int = 0
     agent_model: str = "unknown-model"
     condition: str = "baseline"
+    observer_min_frequency: int = 3
+    observer_min_confidence: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,9 @@ class LongitudinalHarnessRun:
     plan: tuple[PlannedEpisode, ...]
     results: tuple[EpisodeResult, ...]
     summary: dict[str, Any]
+    events: tuple[dict[str, Any], ...] = ()
+    learning_cycles: tuple[dict[str, Any], ...] = ()
+    corrections_count: int = 0
     artifact_dir: Optional[Path] = None
 
 
@@ -120,20 +125,25 @@ def write_run_artifacts(
     plan: list[PlannedEpisode],
     results: list[EpisodeResult],
     summary: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
+    learning_cycles: list[dict[str, Any]] | None = None,
+    corrections_count: int = 0,
 ) -> Path:
     run_dir = Path(output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     episode_rows = [_result_to_dict(result) for result in results]
     plan_rows = [_plan_to_dict(episode) for episode in plan]
+    event_rows = list(events or [])
+    learning_cycle_rows = list(learning_cycles or [])
     activation_summary = _activation_summary(results)
     by_domain = _group_results_by_attribute(results, "domain")
     by_family = _group_results_by_attribute(results, "task_family")
     by_failure_class = _group_results_by_failure_class(results)
 
     (run_dir / "episodes.jsonl").write_text(_to_json_lines(episode_rows))
-    (run_dir / "events.jsonl").write_text("")
-    (run_dir / "learning_cycles.jsonl").write_text("")
+    (run_dir / "events.jsonl").write_text(_to_json_lines(event_rows))
+    (run_dir / "learning_cycles.jsonl").write_text(_to_json_lines(learning_cycle_rows))
     (run_dir / "by_domain.json").write_text(json.dumps(by_domain, indent=2, default=_json_default))
     (run_dir / "by_family.json").write_text(json.dumps(by_family, indent=2, default=_json_default))
     (run_dir / "by_failure_class.json").write_text(
@@ -149,6 +159,9 @@ def write_run_artifacts(
                 "config": asdict(config),
                 "episode_count": len(results),
                 "plan_count": len(plan),
+                "event_count": len(event_rows),
+                "learning_cycle_count": len(learning_cycle_rows),
+                "corrections_count": corrections_count,
                 "summary": summary,
                 "activation_summary": activation_summary,
                 "plan": plan_rows,
@@ -184,6 +197,9 @@ def run_longitudinal_harness(
         condition=config.condition,
     )
     summary = summarize_episode_results(results)
+    events: list[dict[str, Any]] = []
+    learning_cycles: list[dict[str, Any]] = []
+    corrections_count = 0
 
     artifact_dir = None
     if output_dir is not None:
@@ -193,6 +209,9 @@ def run_longitudinal_harness(
             plan=plan,
             results=results,
             summary=summary,
+            events=events,
+            learning_cycles=learning_cycles,
+            corrections_count=corrections_count,
         )
 
     return LongitudinalHarnessRun(
@@ -200,6 +219,9 @@ def run_longitudinal_harness(
         plan=tuple(plan),
         results=tuple(results),
         summary=summary,
+        events=tuple(events),
+        learning_cycles=tuple(learning_cycles),
+        corrections_count=corrections_count,
         artifact_dir=artifact_dir,
     )
 
@@ -218,6 +240,66 @@ def run_baseline_longitudinal_harness(
         config=config,
         output_dir=output_dir,
         records=records,
+    )
+
+
+def run_observer_longitudinal_harness(
+    *,
+    config: LongitudinalHarnessConfig,
+    output_dir: str | Path | None = None,
+) -> LongitudinalHarnessRun:
+    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
+    from benchmark.longitudinal_observer import apply_observer_only_integration
+
+    records = load_task_family_records(config.dataset_path)
+    executor = DeterministicBaselineExecutor(records)
+    plan = build_episode_plan(
+        records,
+        stream_id=config.stream_id,
+        warmup_count=config.warmup_count,
+        learning_count=config.learning_count,
+        evaluation_count=config.evaluation_count,
+        seed=config.seed,
+    )
+    baseline_results = run_episode_plan(
+        plan,
+        executor=executor,
+        agent_model=config.agent_model,
+        condition="baseline",
+    )
+    observer_data_dir = Path(output_dir) / "learning_state" if output_dir is not None else None
+    observer_result = apply_observer_only_integration(
+        results=baseline_results,
+        records=records,
+        data_dir=observer_data_dir,
+        min_frequency=config.observer_min_frequency,
+        min_confidence=config.observer_min_confidence,
+    )
+    results = list(observer_result.results)
+    summary = summarize_episode_results(results)
+
+    artifact_dir = None
+    if output_dir is not None:
+        artifact_dir = write_run_artifacts(
+            output_dir=output_dir,
+            config=config,
+            plan=plan,
+            results=results,
+            summary=summary,
+            events=list(observer_result.events),
+            learning_cycles=list(observer_result.learning_cycles),
+            corrections_count=observer_result.corrections_count,
+        )
+
+    return LongitudinalHarnessRun(
+        config=config,
+        plan=tuple(plan),
+        results=tuple(results),
+        summary=summary,
+        events=observer_result.events,
+        learning_cycles=observer_result.learning_cycles,
+        corrections_count=observer_result.corrections_count,
+        artifact_dir=artifact_dir,
     )
 
 
@@ -241,9 +323,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="unknown-model", help="Agent model label")
     parser.add_argument(
         "--condition",
-        choices=["baseline"],
+        choices=["baseline", "observer_only"],
         default="baseline",
         help="Harness condition to execute",
+    )
+    parser.add_argument(
+        "--observer-min-frequency",
+        type=int,
+        default=3,
+        help="Minimum evidence count before observer learning generates artifacts",
+    )
+    parser.add_argument(
+        "--observer-min-confidence",
+        type=float,
+        default=0.5,
+        help="Minimum confidence threshold for observer learning cycles",
     )
     parser.add_argument(
         "--output-dir",
@@ -266,21 +360,28 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         agent_model=args.model,
         condition=args.condition,
+        observer_min_frequency=args.observer_min_frequency,
+        observer_min_confidence=args.observer_min_confidence,
     )
 
     output_dir = Path(args.output_dir) if args.output_dir else (
         RESULTS_DIR / f"run_longitudinal_{args.condition}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     )
 
-    if args.condition != "baseline":
+    if args.condition == "baseline":
+        run = run_baseline_longitudinal_harness(config=config, output_dir=output_dir)
+    elif args.condition == "observer_only":
+        run = run_observer_longitudinal_harness(config=config, output_dir=output_dir)
+    else:
         parser.error(f"Unsupported condition: {args.condition}")
 
-    run = run_baseline_longitudinal_harness(config=config, output_dir=output_dir)
     print(
         json.dumps(
             {
                 "artifact_dir": str(run.artifact_dir),
                 "summary": run.summary,
+                "learning_cycle_count": len(run.learning_cycles),
+                "corrections_count": run.corrections_count,
             },
             indent=2,
         )
