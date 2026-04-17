@@ -165,10 +165,11 @@ def run_longitudinal_harness(
     executor: EpisodeExecutor,
     config: LongitudinalHarnessConfig,
     output_dir: str | Path | None = None,
+    records: list[Any] | None = None,
 ) -> LongitudinalHarnessRun:
-    records = load_task_family_records(config.dataset_path)
+    task_family_records = records or load_task_family_records(config.dataset_path)
     plan = build_episode_plan(
-        records,
+        task_family_records,
         stream_id=config.stream_id,
         warmup_count=config.warmup_count,
         learning_count=config.learning_count,
@@ -199,4 +200,21 @@ def run_longitudinal_harness(
         results=tuple(results),
         summary=summary,
         artifact_dir=artifact_dir,
+    )
+
+
+def run_baseline_longitudinal_harness(
+    *,
+    config: LongitudinalHarnessConfig,
+    output_dir: str | Path | None = None,
+) -> LongitudinalHarnessRun:
+    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
+
+    records = load_task_family_records(config.dataset_path)
+    executor = DeterministicBaselineExecutor(records)
+    return run_longitudinal_harness(
+        executor=executor,
+        config=config,
+        output_dir=output_dir,
+        records=records,
     )
