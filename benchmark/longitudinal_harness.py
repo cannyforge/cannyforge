@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -247,6 +248,108 @@ def write_suite_artifacts(
     suite_dir = Path(output_dir)
     suite_dir.mkdir(parents=True, exist_ok=True)
     suite_summary = _condition_suite_summary(condition_runs)
+
+    cost_curve_rows: list[dict[str, Any]] = []
+    window_comparison_rows: list[dict[str, Any]] = []
+    baseline_evaluation = suite_summary["conditions"].get("baseline", {}).get("evaluation", {})
+
+    for condition, run in condition_runs.items():
+        for window in ("warmup", "learning", "evaluation"):
+            metrics = run.summary["by_window"].get(window, {})
+            if not metrics:
+                continue
+            cost_curve_rows.append(
+                {
+                    "condition": condition,
+                    "window": window,
+                    "n": metrics.get("n", 0),
+                    "success_rate": metrics.get("success_rate", 0.0),
+                    "mean_retries": metrics.get("mean_retries", 0.0),
+                    "mean_turns": metrics.get("mean_turns", 0.0),
+                    "mean_tool_calls": metrics.get("mean_tool_calls", 0.0),
+                    "mean_tokens_total": metrics.get("mean_tokens_total", 0.0),
+                    "mean_latency_ms": metrics.get("mean_latency_ms", 0.0),
+                    "activation_rate": metrics.get("activation_rate", 0.0),
+                    "effective_injection_rate": metrics.get("effective_injection_rate", 0.0),
+                }
+            )
+
+        warmup = run.summary["by_window"].get("warmup", {})
+        learning = run.summary["by_window"].get("learning", {})
+        evaluation = run.summary["by_window"].get("evaluation", {})
+        delta = suite_summary["conditions"][condition].get("evaluation_delta_vs_baseline", {})
+        window_comparison_rows.append(
+            {
+                "condition": condition,
+                "learning_cycle_count": len(run.learning_cycles),
+                "corrections_count": run.corrections_count,
+                "warmup_success_rate": warmup.get("success_rate", 0.0),
+                "learning_success_rate": learning.get("success_rate", 0.0),
+                "evaluation_success_rate": evaluation.get("success_rate", 0.0),
+                "evaluation_mean_retries": evaluation.get("mean_retries", 0.0),
+                "evaluation_mean_turns": evaluation.get("mean_turns", 0.0),
+                "evaluation_mean_tokens_total": evaluation.get("mean_tokens_total", 0.0),
+                "evaluation_mean_latency_ms": evaluation.get("mean_latency_ms", 0.0),
+                "evaluation_activation_rate": evaluation.get("activation_rate", 0.0),
+                "evaluation_effective_injection_rate": evaluation.get("effective_injection_rate", 0.0),
+                "delta_success_rate_vs_baseline": delta.get("success_rate", 0.0),
+                "delta_mean_retries_vs_baseline": delta.get("mean_retries", 0.0),
+                "delta_mean_turns_vs_baseline": delta.get("mean_turns", 0.0),
+                "delta_mean_tokens_total_vs_baseline": delta.get("mean_tokens_total", 0.0),
+                "delta_mean_latency_ms_vs_baseline": delta.get("mean_latency_ms", 0.0),
+                "delta_activation_rate_vs_baseline": delta.get("activation_rate", 0.0),
+                "baseline_evaluation_success_rate": baseline_evaluation.get("success_rate", 0.0),
+            }
+        )
+
+    with (suite_dir / "cost_curves.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "condition",
+                "window",
+                "n",
+                "success_rate",
+                "mean_retries",
+                "mean_turns",
+                "mean_tool_calls",
+                "mean_tokens_total",
+                "mean_latency_ms",
+                "activation_rate",
+                "effective_injection_rate",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(cost_curve_rows)
+
+    with (suite_dir / "window_comparison.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "condition",
+                "learning_cycle_count",
+                "corrections_count",
+                "warmup_success_rate",
+                "learning_success_rate",
+                "evaluation_success_rate",
+                "evaluation_mean_retries",
+                "evaluation_mean_turns",
+                "evaluation_mean_tokens_total",
+                "evaluation_mean_latency_ms",
+                "evaluation_activation_rate",
+                "evaluation_effective_injection_rate",
+                "delta_success_rate_vs_baseline",
+                "delta_mean_retries_vs_baseline",
+                "delta_mean_turns_vs_baseline",
+                "delta_mean_tokens_total_vs_baseline",
+                "delta_mean_latency_ms_vs_baseline",
+                "delta_activation_rate_vs_baseline",
+                "baseline_evaluation_success_rate",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(window_comparison_rows)
+
     (suite_dir / "suite_summary.json").write_text(
         json.dumps(
             {
