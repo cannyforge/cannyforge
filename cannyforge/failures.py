@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional
+import uuid
 
 
 @dataclass(frozen=True)
@@ -129,9 +130,11 @@ class FailureRecord:
     trace_context: Dict[str, Any] = field(default_factory=dict)
     scenario_id: str = ""
     legacy_error_type: Optional[str] = None
+    id: str = field(default_factory=lambda: f"failure_{uuid.uuid4().hex}")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "id": self.id,
             "timestamp": self.timestamp.isoformat(),
             "skill": self.skill_name,
             "task": self.task_description,
@@ -150,6 +153,7 @@ class FailureRecord:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FailureRecord":
         return cls(
+            id=data.get("id", f"failure_{uuid.uuid4().hex}"),
             timestamp=datetime.fromisoformat(data["timestamp"]),
             skill_name=data["skill"],
             task_description=data["task"],

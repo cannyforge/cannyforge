@@ -4,6 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
+from cannyforge.llm import LLMResponse
 from cannyforge.knowledge import (
     Condition, ConditionOperator, Action, Rule, RuleType, RuleStatus,
     KnowledgeBase, RuleGenerator,
@@ -333,3 +334,42 @@ class TestRuntimePatternRegistration:
                 "detection": [],
                 # missing 'remediation' and 'description'
             })
+
+
+class TestPatternSuggestion:
+    def test_suggest_pattern_uses_raw_response_text(self):
+        class FakeProvider:
+            def generate(self, request):
+                assert "Analyze these error examples" in request.task_description
+                assert request.skill_name == "pattern_generator"
+                return LLMResponse(
+                    content={"body": "non-json wrapper"},
+                    raw_response=(
+                        '{'
+                        '"detection": ['
+                        '{"field": "context.has_prior_context", "operator": "equals", "value": false}'
+                        '], '
+                        '"remediation": ['
+                        '{"action_type": "append", "target": "context.warnings", "value": "Check prior context first"}'
+                        '], '
+                        '"recovery": [], '
+                        '"description": "Detects missing prior context before a dependent step"'
+                        '}'
+                    ),
+                )
+
+        pattern = RuleGenerator.suggest_pattern(
+            "ContextMissError",
+            examples=[
+                {
+                    "task_description": "If the account is conservative, create a report",
+                    "error_message": {"status": "error", "message": "missing prior context"},
+                    "context_snapshot": {"has_prior_context": False},
+                }
+            ],
+            llm_provider=FakeProvider(),
+        )
+
+        assert pattern is not None
+        assert pattern["description"].startswith("Detects missing prior context")
+        assert pattern["detection"][0]["field"] == "context.has_prior_context"

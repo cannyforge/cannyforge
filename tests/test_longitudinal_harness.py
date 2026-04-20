@@ -4,6 +4,8 @@ import sys
 from csv import DictReader
 from pathlib import Path
 
+import benchmark.longitudinal_harness as longitudinal_harness
+
 from benchmark.longitudinal_harness import (
     REQUIRED_ARTIFACT_FILES,
     LongitudinalHarnessConfig,
@@ -343,6 +345,85 @@ def test_run_longitudinal_condition_suite_writes_suite_summary(tmp_path) -> None
     failures_text = (suite_dir / "representative_failures.md").read_text()
     assert "Representative Wins" in wins_text
     assert "Representative Failures" in failures_text
+
+
+def test_run_cannyforge_online_longitudinal_harness_live_executor_reuses_learned_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class StubExecutor:
+        def __init__(self, mode: str):
+            self._mode = mode
+
+        def execute(self, episode):
+            if self._mode == "baseline":
+                failed = episode.window != "learning"
+                return {
+                    "task_succeeded": not failed,
+                    "final_outcome": "failed_precondition" if failed else "completed_workflow",
+                    "num_model_turns": 4,
+                    "num_tool_calls": 3,
+                    "num_failed_tool_calls": 1 if failed else 0,
+                    "num_retries": 1 if failed else 0,
+                    "tokens_prompt": 1000,
+                    "tokens_completion": 250,
+                    "tokens_total": 1250,
+                    "latency_ms": 3000.0,
+                    "learning_artifacts_available": 0,
+                    "correction_injected_count": 0,
+                    "rules_applied_count": 0,
+                    "effective_injection_count": 0,
+                    "failure_classes_observed": ["missing_prerequisite"] if failed else [],
+                    "score": {"sequence_score": 0.0 if failed else 1.0},
+                }
+
+            return {
+                "task_succeeded": True,
+                "final_outcome": "completed_workflow",
+                "num_model_turns": 3,
+                "num_tool_calls": 2,
+                "num_failed_tool_calls": 0,
+                "num_retries": 0,
+                "tokens_prompt": 800,
+                "tokens_completion": 220,
+                "tokens_total": 1020,
+                "latency_ms": 2100.0,
+                "learning_artifacts_available": 0,
+                "correction_injected_count": 1,
+                "rules_applied_count": 1,
+                "effective_injection_count": 0,
+                "failure_classes_observed": [],
+                "score": {"sequence_score": 1.0},
+            }
+
+    def fake_build_executor(records, config, *, forge=None):
+        return StubExecutor("online" if forge is not None else "baseline")
+
+    monkeypatch.setattr(longitudinal_harness, "_build_episode_executor", fake_build_executor)
+
+    config = LongitudinalHarnessConfig(
+        stream_id="seed_stream",
+        warmup_count=1,
+        learning_count=1,
+        evaluation_count=1,
+        seed=5,
+        agent_model="gemini-2.5-flash-lite",
+        executor_backend="real-llm",
+        condition="cannyforge_online",
+        observer_min_frequency=1,
+    )
+
+    run = run_cannyforge_online_longitudinal_harness(
+        config=config,
+        output_dir=tmp_path / "live_online_run",
+    )
+
+    assert run.corrections_count >= 1
+    assert run.results[2].window == "evaluation"
+    assert run.results[2].task_succeeded is True
+    assert run.results[2].correction_injected_count == 1
+    assert run.results[2].effective_injection_count == 1
+    assert any(event["event_type"] == "activation_applied" for event in run.events)
 
 
 def test_longitudinal_harness_cli_runs_all_conditions_suite(tmp_path) -> None:

@@ -500,6 +500,15 @@ class KnowledgeBase:
             existing_by_id.source_errors = sorted(
                 set(existing_by_id.source_errors + correction.source_errors)
             )
+            existing_by_id.trigger_keywords = sorted(
+                set(existing_by_id.trigger_keywords + correction.trigger_keywords)
+            )
+            existing_by_id.trigger_task_families = sorted(
+                set(existing_by_id.trigger_task_families + correction.trigger_task_families)
+            )
+            existing_by_id.trigger_transfer_clusters = sorted(
+                set(existing_by_id.trigger_transfer_clusters + correction.trigger_transfer_clusters)
+            )
             return
 
         for existing in self.corrections_by_skill[skill_name]:
@@ -507,6 +516,15 @@ class KnowledgeBase:
                     and existing.content.strip() == correction.content.strip()):
                 existing.source_errors = sorted(
                     set(existing.source_errors + correction.source_errors)
+                )
+                existing.trigger_keywords = sorted(
+                    set(existing.trigger_keywords + correction.trigger_keywords)
+                )
+                existing.trigger_task_families = sorted(
+                    set(existing.trigger_task_families + correction.trigger_task_families)
+                )
+                existing.trigger_transfer_clusters = sorted(
+                    set(existing.trigger_transfer_clusters + correction.trigger_transfer_clusters)
                 )
                 return
 
@@ -1145,17 +1163,29 @@ Use standard Action types: add_field, flag, append, reject"""
         try:
             # Use the LLM to generate the pattern
             from cannyforge.llm import LLMRequest
+
             request = LLMRequest(
-                task_description=f"Suggest pattern for {error_type}",
-                skill_name="",
-                skill_description="Pattern generation",
-                context={},
+                task_description=prompt,
+                skill_name="pattern_generator",
+                skill_description="Suggest PATTERN_LIBRARY entries from repeated runtime failures",
+                context={"error_type": error_type, "examples": examples[:5]},
+                system_prompt=(
+                    "You analyze repeated runtime failures and return a single valid JSON object. "
+                    "Do not wrap the response in markdown fences or prose."
+                ),
             )
             response = llm_provider.generate(request)
 
-            # Parse the response (assuming it's JSON in the content)
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', response.content or "")
+            raw_text = response.raw_response if isinstance(response.raw_response, str) else ""
+            if not raw_text:
+                if isinstance(response.content, str):
+                    raw_text = response.content
+                elif isinstance(response.content, dict):
+                    raw_text = json.dumps(response.content)
+                else:
+                    raw_text = str(response.content or "")
+
+            json_match = re.search(r'\{[\s\S]*\}', raw_text)
             if json_match:
                 pattern = json.loads(json_match.group())
                 logger.info(f"Suggested pattern for {error_type}: {pattern.get('description')}")

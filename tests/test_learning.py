@@ -211,6 +211,35 @@ class TestLearningEngine:
         assert any(rule.source_error_type == "SequenceViolationError" for rule in rules)
         assert any(rule.rule_type == RuleType.RECOVERY for rule in rules)
 
+    def test_learning_cycle_does_not_override_known_patterns_with_suggestions(
+        self,
+        knowledge_base,
+        tmp_data_dir,
+        monkeypatch,
+    ):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(5):
+            engine.record_error(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                error_type="WrongToolError",
+                error_message="Observed benchmark failure: wrong_tool",
+                context_snapshot={},
+                rules_applied=[],
+            )
+
+        monkeypatch.setattr(engine.pattern_detector, "detect_patterns", lambda errors: [])
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("suggest_pattern should not run for known error types")
+
+        monkeypatch.setattr(RuleGenerator, "suggest_pattern", staticmethod(fail_if_called))
+        metrics = engine.run_learning_cycle(min_frequency=1, min_confidence=0.5, llm_provider=object())
+
+        assert metrics.patterns_detected == 0
+        assert metrics.corrections_generated == 0
+
     def test_clear_data(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
         engine.record_error(

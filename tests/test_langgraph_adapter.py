@@ -45,9 +45,77 @@ class TestCannyForgeMiddleware:
     def test_state_to_context_empty(self, middleware):
         ctx = middleware._state_to_context({})
         assert ctx["task"]["description"] == ""
-        assert ctx["context"]["tool_match_confidence"] == 0.5
+        assert ctx["context"]["tool_match_confidence"] == 1.0
         assert ctx["context"]["has_required_params"] is True
         assert ctx["context"]["runtime_signals"] == []
+
+    def test_state_to_context_uses_task_defaults_when_runtime_state_drops_metadata(self, middleware):
+        middleware.begin_task()
+        middleware.set_task_defaults(
+            {
+                "task_family": "conditional_portfolio_then_report",
+                "transfer_cluster": "context_gate_before_report",
+                "required_steps": ["fetch_client_portfolio", "generate_client_report"],
+                "prerequisite_map": {"generate_client_report": ["fetch_client_portfolio"]},
+                "available_tools": ["fetch_client_portfolio", "generate_client_report"],
+            }
+        )
+
+        ctx = middleware._state_to_context(
+            {
+                "messages": [
+                    {"role": "user", "content": "Create the investment review report"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"name": "generate_client_report", "args": {"report_type": "investment_review"}}],
+                    },
+                ],
+                "completed_tools": ["fetch_client_portfolio"],
+                "completed_steps": ["fetch_client_portfolio"],
+            }
+        )
+
+        assert ctx["context"]["task_family"] == "conditional_portfolio_then_report"
+        assert ctx["context"]["transfer_cluster"] == "context_gate_before_report"
+        assert ctx["context"]["requires_prior_context"] is True
+        assert "prerequisite_map" in ctx["context"]["runtime_signals"]
+
+    def test_state_to_context_infers_expected_tool_confidence(self, middleware):
+        state = {
+            "messages": [
+                {"role": "user", "content": "Review the account before filing the report"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "fetch_client_portfolio", "args": {"account": "Alderman Trust"}}],
+                },
+            ],
+            "required_steps": ["fetch_client_portfolio", "file_regulatory_report"],
+            "available_tools": ["fetch_client_portfolio", "file_regulatory_report", "execute_trade"],
+        }
+
+        ctx = middleware._state_to_context(state)
+        assert ctx["context"]["attempted_tool"] == "fetch_client_portfolio"
+        assert ctx["context"]["tool_match_confidence"] == 0.95
+
+    def test_state_to_context_infers_unexpected_tool_confidence(self, middleware):
+        state = {
+            "messages": [
+                {"role": "user", "content": "Review the account before filing the report"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "execute_trade", "args": {"ticker": "NVDA"}}],
+                },
+            ],
+            "required_steps": ["fetch_client_portfolio", "file_regulatory_report"],
+            "available_tools": ["fetch_client_portfolio", "file_regulatory_report", "execute_trade"],
+        }
+
+        ctx = middleware._state_to_context(state)
+        assert ctx["context"]["attempted_tool"] == "execute_trade"
+        assert ctx["context"]["tool_match_confidence"] == 0.3
 
     def test_state_to_context_message_object(self, middleware):
         class FakeMsg:
@@ -98,6 +166,61 @@ class TestCannyForgeMiddleware:
             "sequence_violation_detected",
             "retry_loop_detected",
         }
+
+    def test_state_to_context_infers_context_carry_signals_for_context_gate_tasks(self, middleware):
+        state = {
+            "messages": [
+                {"role": "user", "content": "If the Castellano account is conservative, create the investment review"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "generate_client_report", "args": {"report_type": "investment_review"}}],
+                },
+            ],
+            "transfer_cluster": "context_gate_before_report",
+            "completed_tools": ["fetch_client_portfolio"],
+            "required_steps": ["fetch_client_portfolio", "generate_client_report"],
+            "completed_steps": ["fetch_client_portfolio"],
+            "prerequisite_map": {"generate_client_report": ["fetch_client_portfolio"]},
+        }
+
+        ctx = middleware._state_to_context(state)
+
+        assert ctx["context"]["requires_prior_context"] is True
+        assert ctx["context"]["has_prior_context"] is False
+        assert ctx["context"]["upstream_artifacts"] == ["fetch_client_portfolio_output"]
+        assert ctx["context"]["consumed_artifacts"] == []
+        assert set(ctx["context"]["runtime_signals"]) >= {
+            "attempted_tool",
+            "upstream_artifacts",
+            "consumed_artifacts",
+            "requires_prior_context",
+            "has_prior_context",
+        }
+
+    def test_state_to_context_infers_missing_context_signals_before_prerequisite_is_completed(self, middleware):
+        state = {
+            "messages": [
+                {"role": "user", "content": "If the Castellano account is conservative, create the investment review"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "generate_client_report", "args": {"report_type": "investment_review"}}],
+                },
+            ],
+            "transfer_cluster": "context_gate_before_report",
+            "completed_tools": [],
+            "required_steps": ["fetch_client_portfolio", "generate_client_report"],
+            "completed_steps": [],
+            "prerequisite_map": {"generate_client_report": ["fetch_client_portfolio"]},
+        }
+
+        ctx = middleware._state_to_context(state)
+
+        assert ctx["context"]["requires_prior_context"] is True
+        assert ctx["context"]["has_prior_context"] is False
+        assert ctx["context"]["upstream_artifacts"] == ["fetch_client_portfolio_output"]
+        assert "consumed_artifacts" in ctx["context"]["runtime_signals"]
 
     def test_before_model_no_rules(self, middleware):
         state = {"messages": [{"content": "hello"}]}
@@ -150,6 +273,62 @@ class TestCannyForgeMiddleware:
         content = first.get("content", "") if isinstance(first, dict) else first.content
         assert "[CANNYFORGE]" in content
         assert "search_web" in content
+
+    def test_before_model_filters_corrections_by_trigger_keywords(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_trade",
+                skill_name="tool_use",
+                error_type="WrongToolError",
+                content="Use compliance and trade tools for rebalance requests.",
+                source_errors=["e1"],
+                created_at=1.0,
+                trigger_keywords=["rebalance", "trade"],
+            ),
+        )
+
+        unrelated = middleware.before_model({"messages": [{"content": "File a SAR report"}]})
+        assert len(unrelated["messages"]) == 1
+
+        related = middleware.before_model({"messages": [{"content": "Review the rebalance trade"}]})
+        assert len(related["messages"]) == 2
+        first = related["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "rebalance requests" in content
+
+    def test_before_model_filters_corrections_by_transfer_cluster(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_cluster",
+                skill_name="tool_use",
+                error_type="WrongToolError",
+                content="Complete compliance before trading.",
+                source_errors=["e1"],
+                created_at=1.0,
+                trigger_transfer_clusters=["compliance_before_trade"],
+            ),
+        )
+
+        skipped = middleware.before_model(
+            {
+                "messages": [{"content": "File a SAR report"}],
+                "transfer_cluster": "regulatory_report_formatting",
+            }
+        )
+        assert len(skipped["messages"]) == 1
+
+        injected = middleware.before_model(
+            {
+                "messages": [{"content": "Review and trade the account"}],
+                "transfer_cluster": "compliance_before_trade",
+            }
+        )
+        assert len(injected["messages"]) == 2
+        first = injected["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "compliance before trading" in content.lower()
 
     def test_before_model_scopes_domain_corrections(self, middleware, forge):
         forge.knowledge_base.add_correction(
@@ -342,11 +521,96 @@ class TestCannyForgeMiddleware:
         assert saved.times_injected == 1
         assert saved.times_effective == 1
 
+    def test_before_model_deduplicates_reinjected_corrections_across_turns(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_generic",
+                skill_name="tool_use",
+                error_type="WrongToolError",
+                content="Pick the correct tool for the task.",
+                source_errors=["e1"],
+                created_at=1.0,
+                correction_type="tool_selection",
+                trigger_task_families=["portfolio_prereq_then_action"],
+                trigger_transfer_clusters=["compliance_before_trade"],
+            ),
+        )
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_sequence_once",
+                skill_name="tool_use",
+                error_type="SequenceViolationError",
+                content="Fetch the portfolio before compliance and trade.",
+                source_errors=["e2"],
+                created_at=1.0,
+                correction_type="sequence",
+                trigger_task_families=["portfolio_prereq_then_action"],
+                trigger_transfer_clusters=["compliance_before_trade"],
+            ),
+        )
+
+        middleware.begin_task()
+        middleware.before_model(
+            {
+                "messages": [{"content": "Check if NVDA is allowed and then buy it"}],
+                "task_family": "portfolio_prereq_then_action",
+                "transfer_cluster": "compliance_before_trade",
+                "required_steps": ["fetch_client_portfolio", "run_compliance_check", "execute_trade"],
+                "completed_steps": [],
+                "completed_tools": [],
+                "prerequisite_map": {
+                    "run_compliance_check": ["fetch_client_portfolio"],
+                    "execute_trade": ["fetch_client_portfolio", "run_compliance_check"],
+                },
+            }
+        )
+
+        middleware.before_model(
+            {
+                "messages": [
+                    {"role": "user", "content": "Check if NVDA is allowed and then buy it"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"name": "run_compliance_check", "args": {"check_request": "NVDA purchase"}}],
+                    },
+                ],
+                "task_family": "portfolio_prereq_then_action",
+                "transfer_cluster": "compliance_before_trade",
+                "required_steps": ["fetch_client_portfolio", "run_compliance_check", "execute_trade"],
+                "completed_steps": [],
+                "completed_tools": [],
+                "prerequisite_map": {
+                    "run_compliance_check": ["fetch_client_portfolio"],
+                    "execute_trade": ["fetch_client_portfolio", "run_compliance_check"],
+                },
+            }
+        )
+
+        assert middleware.task_corrections_injected == ["corr_generic", "corr_sequence_once"]
+        corrections = {correction.id: correction for correction in forge.knowledge_base.get_corrections("tool_use")}
+        assert corrections["corr_generic"].times_injected == 1
+        assert corrections["corr_sequence_once"].times_injected == 1
+
     def test_after_model_no_errors(self, middleware):
         middleware._last_context = {"task": {"description": "test"}}
-        state = {"messages": [{"content": "result"}]}
+        state = {
+            "messages": [
+                {"role": "user", "content": "Review and trade the account"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "fetch_client_portfolio", "args": {"account": "Alderman Trust"}}],
+                },
+                {"type": "tool", "name": "fetch_client_portfolio", "status": "success", "content": "ok"},
+            ]
+        }
         result = middleware.after_model(state)
         assert result is state
+        assert state["completed_tools"] == ["fetch_client_portfolio"]
+        assert state["completed_steps"] == ["fetch_client_portfolio"]
 
     def test_after_model_records_error(self, middleware, forge):
         middleware._last_context = {"task": {"description": "test task"}}
@@ -432,7 +696,149 @@ class TestCannyForgeMiddleware:
         content = first.get("content", "") if isinstance(first, dict) else first.content
         assert "Complete prerequisites first" in content
 
-    def test_before_model_uses_low_confidence_default_for_rule_matching(self, middleware, forge):
+    def test_before_model_injects_sequence_guidance_on_clean_intermediate_turn_once(self, middleware, forge):
+        rule = Rule(
+            id="rule_sequence_midturn",
+            name="Sequence midturn",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.sequence_violation_detected", ConditionOperator.EQUALS, True),
+            ],
+            actions=[
+                Action("append", "context.warnings", "Complete compliance before trading."),
+            ],
+            source_error_type="SequenceViolationError",
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_sequence_midturn",
+                skill_name="tool_use",
+                error_type="SequenceViolationError",
+                content="Run compliance before executing the trade.",
+                source_errors=["e1"],
+                created_at=1.0,
+                trigger_task_families=["portfolio_prereq_then_action"],
+                trigger_transfer_clusters=["compliance_before_trade"],
+            ),
+        )
+
+        def build_state():
+            return {
+                "messages": [
+                    {"role": "user", "content": "Check NVDA allowability and then execute the purchase"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"name": "execute_trade", "args": {"symbol": "NVDA"}}],
+                    },
+                    {"type": "tool", "name": "execute_trade", "status": "success", "content": "queued"},
+                ],
+                "task_family": "portfolio_prereq_then_action",
+                "transfer_cluster": "compliance_before_trade",
+                "completed_tools": ["fetch_client_portfolio"],
+                "completed_steps": ["fetch_client_portfolio"],
+                "required_steps": ["fetch_client_portfolio", "run_compliance_check", "execute_trade"],
+                "prerequisite_map": {"execute_trade": ["run_compliance_check"]},
+            }
+
+        first_result = middleware.before_model(build_state())
+        assert len(first_result["messages"]) == 4
+        first_message = first_result["messages"][0]
+        first_content = first_message.get("content", "") if isinstance(first_message, dict) else first_message.content
+        assert "Run compliance before executing the trade" in first_content
+        assert "Complete compliance before trading" in first_content
+
+        second_state = build_state()
+        second_result = middleware.before_model(second_state)
+        assert second_result["messages"] == second_state["messages"]
+
+    def test_before_model_injects_context_guidance_on_clean_intermediate_turn(self, middleware, forge):
+        rule = Rule(
+            id="rule_context_midturn",
+            name="Context midturn",
+            rule_type=RuleType.PREVENTION,
+            conditions=[
+                Condition("context.requires_prior_context", ConditionOperator.EQUALS, True),
+                Condition("context.has_prior_context", ConditionOperator.EQUALS, False),
+            ],
+            actions=[
+                Action("append", "context.warnings", "Carry forward the fetched account context before reporting."),
+            ],
+            source_error_type="ContextMissError",
+            confidence=0.9,
+        )
+        forge.knowledge_base.add_rule("tool_use", rule)
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_context_midturn",
+                skill_name="tool_use",
+                error_type="ContextMissError",
+                content="Reuse the fetched portfolio context before generating the report.",
+                source_errors=["e1"],
+                created_at=1.0,
+                trigger_task_families=["conditional_portfolio_then_report"],
+                trigger_transfer_clusters=["context_gate_before_report"],
+            ),
+        )
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "If the Castellano account is conservative, create an investment review report"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "generate_client_report", "args": {"report_type": "investment_review"}}],
+                },
+                {"type": "tool", "name": "generate_client_report", "status": "success", "content": "draft created"},
+            ],
+            "task_family": "conditional_portfolio_then_report",
+            "transfer_cluster": "context_gate_before_report",
+            "completed_tools": ["fetch_client_portfolio"],
+            "completed_steps": ["fetch_client_portfolio"],
+            "required_steps": ["fetch_client_portfolio", "generate_client_report"],
+            "prerequisite_map": {"generate_client_report": ["fetch_client_portfolio"]},
+        }
+
+        result = middleware.before_model(state)
+        assert len(result["messages"]) == 4
+        first = result["messages"][0]
+        content = first.get("content", "") if isinstance(first, dict) else first.content
+        assert "Reuse the fetched portfolio context" in content
+        assert "Carry forward the fetched account context before reporting" in content
+
+    def test_before_model_records_rejected_correction_reason(self, middleware, forge):
+        forge.knowledge_base.add_correction(
+            "tool_use",
+            Correction(
+                id="corr_context_runtime",
+                skill_name="tool_use",
+                error_type="ContextMissError",
+                content="Reuse prior context before reporting.",
+                source_errors=["e1"],
+                created_at=1.0,
+                trigger_task_families=["conditional_portfolio_then_report"],
+                trigger_transfer_clusters=["context_gate_before_report"],
+            ),
+        )
+
+        middleware.before_model({"messages": [{"content": "Create the investment review report"}]})
+
+        decisions = middleware.task_debug_records[0]["correction_decisions"]
+        assert decisions == [
+            {
+                "correction_id": "corr_context_runtime",
+                "error_type": "ContextMissError",
+                "correction_type": "",
+                "accepted": False,
+                "reason": "runtime_unsupported",
+            }
+        ]
+
+    def test_before_model_skips_low_confidence_rule_without_tool_choice(self, middleware, forge):
         rule = Rule(
             id="rule_default_conf",
             name="Default confidence rule",
@@ -450,10 +856,8 @@ class TestCannyForgeMiddleware:
 
         result = middleware.before_model({})
 
-        assert "rule_default_conf" in middleware.rules_applied
-        first = result["messages"][0]
-        content = first.get("content", "") if isinstance(first, dict) else first.content
-        assert "Low confidence default fired" in content
+        assert "rule_default_conf" not in middleware.rules_applied
+        assert result["messages"] == []
 
     @pytest.mark.parametrize(
         ("times_injected", "times_effective", "age_days", "expected_injected"),

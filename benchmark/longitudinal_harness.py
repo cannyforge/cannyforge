@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -18,6 +18,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BENCHMARK_DIR / "results"
 REQUIRED_ARTIFACT_FILES = (
     "episodes.jsonl",
+    "episode_debug.jsonl",
     "events.jsonl",
     "summary.json",
     "by_domain.json",
@@ -38,6 +39,10 @@ class LongitudinalHarnessConfig:
     evaluation_count: int = 50
     seed: int = 0
     agent_model: str = "unknown-model"
+    executor_backend: str = "deterministic"
+    llm_base_url: str | None = None
+    llm_timeout_seconds: float = 120.0
+    no_think: bool = False
     condition: str = "baseline"
     observer_min_frequency: int = 3
     observer_min_confidence: float = 0.5
@@ -135,6 +140,7 @@ def write_run_artifacts(
     plan: list[PlannedEpisode],
     results: list[EpisodeResult],
     summary: dict[str, Any],
+    episode_debug_rows: list[dict[str, Any]] | None = None,
     events: list[dict[str, Any]] | None = None,
     learning_cycles: list[dict[str, Any]] | None = None,
     corrections_count: int = 0,
@@ -143,6 +149,7 @@ def write_run_artifacts(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     episode_rows = [_result_to_dict(result) for result in results]
+    debug_rows = list(episode_debug_rows or [])
     plan_rows = [_plan_to_dict(episode) for episode in plan]
     event_rows = list(events or [])
     learning_cycle_rows = list(learning_cycles or [])
@@ -152,6 +159,7 @@ def write_run_artifacts(
     by_failure_class = _group_results_by_failure_class(results)
 
     (run_dir / "episodes.jsonl").write_text(_to_json_lines(episode_rows))
+    (run_dir / "episode_debug.jsonl").write_text(_to_json_lines(debug_rows))
     (run_dir / "events.jsonl").write_text(_to_json_lines(event_rows))
     (run_dir / "learning_cycles.jsonl").write_text(_to_json_lines(learning_cycle_rows))
     (run_dir / "by_domain.json").write_text(json.dumps(by_domain, indent=2, default=_json_default))
@@ -168,6 +176,7 @@ def write_run_artifacts(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "config": asdict(config),
                 "episode_count": len(results),
+                "episode_debug_count": len(debug_rows),
                 "plan_count": len(plan),
                 "event_count": len(event_rows),
                 "learning_cycle_count": len(learning_cycle_rows),
@@ -182,6 +191,103 @@ def write_run_artifacts(
     )
 
     return run_dir
+
+
+def _rule_lookup(forge: Any) -> dict[str, Any]:
+    rules_by_id: dict[str, Any] = {}
+    for rules in getattr(forge.knowledge_base, "rules_by_skill", {}).values():
+        for rule in rules:
+            rules_by_id[rule.id] = rule
+    return rules_by_id
+
+
+def _correction_lookup(forge: Any) -> dict[str, Any]:
+    corrections_by_id: dict[str, Any] = {}
+    for corrections in getattr(forge.knowledge_base, "corrections_by_skill", {}).values():
+        for correction in corrections:
+            corrections_by_id[correction.id] = correction
+    return corrections_by_id
+
+
+def _learning_fact_lookup(forge: Any) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for error in getattr(forge.learning_engine.error_repo, "errors", []):
+        record_id = getattr(error, "id", "")
+        if record_id:
+            records[record_id] = {"kind": "error", **error.to_dict()}
+    for failure in getattr(forge.learning_engine.failure_repo, "failures", []):
+        record_id = getattr(failure, "id", "")
+        if record_id:
+            records[record_id] = {"kind": "failure", **failure.to_dict()}
+    return records
+
+
+def _build_live_episode_debug_rows(
+    *,
+    results: list[EpisodeResult],
+    baseline_by_id: dict[str, EpisodeResult],
+    events: list[dict[str, Any]],
+    live_debug_by_id: dict[str, dict[str, Any]],
+    forge: Any,
+) -> list[dict[str, Any]]:
+    event_by_episode = {
+        event.get("episode_id"): event
+        for event in events
+        if event.get("episode_id")
+    }
+    corrections_by_id = _correction_lookup(forge)
+    rules_by_id = _rule_lookup(forge)
+    facts_by_id = _learning_fact_lookup(forge)
+
+    debug_rows: list[dict[str, Any]] = []
+    for result in results:
+        debug_payload = live_debug_by_id.get(result.episode_id, {})
+        event = event_by_episode.get(result.episode_id, {})
+        correction_ids = list(debug_payload.get("correction_ids", event.get("correction_ids", [])))
+        rule_ids = list(debug_payload.get("rule_ids", event.get("rule_ids", [])))
+        matched_corrections = [
+            corrections_by_id[correction_id].to_dict()
+            for correction_id in correction_ids
+            if correction_id in corrections_by_id
+        ]
+        matched_rules = [
+            rules_by_id[rule_id].to_dict()
+            for rule_id in rule_ids
+            if rule_id in rules_by_id
+        ]
+        source_fact_ids = sorted(
+            {
+                source_id
+                for correction in matched_corrections
+                for source_id in correction.get("source_errors", [])
+            }
+        )
+        source_facts = [facts_by_id[source_id] for source_id in source_fact_ids if source_id in facts_by_id]
+        baseline_result = baseline_by_id.get(result.episode_id)
+
+        debug_rows.append(
+            {
+                "episode_id": result.episode_id,
+                "window": result.window,
+                "condition": result.condition,
+                "task_family": result.task_family,
+                "task_variant_id": result.task_variant_id,
+                "task_succeeded": result.task_succeeded,
+                "final_outcome": result.final_outcome,
+                "failure_classes_observed": list(result.failure_classes_observed),
+                "correction_injected_count": result.correction_injected_count,
+                "rules_applied_count": result.rules_applied_count,
+                "effective_injection_count": result.effective_injection_count,
+                "baseline": _result_to_dict(baseline_result) if baseline_result is not None else None,
+                "activation_event": event,
+                "runtime_debug": debug_payload,
+                "matched_corrections": matched_corrections,
+                "matched_rules": matched_rules,
+                "source_learning_facts": source_facts,
+            }
+        )
+
+    return debug_rows
 
 
 def _condition_suite_summary(
@@ -500,6 +606,7 @@ def run_longitudinal_harness(
             plan=plan,
             results=results,
             summary=summary,
+            episode_debug_rows=[],
             events=events,
             learning_cycles=learning_cycles,
             corrections_count=corrections_count,
@@ -517,15 +624,55 @@ def run_longitudinal_harness(
     )
 
 
+def _resolved_model_name(config: LongitudinalHarnessConfig) -> str | None:
+    return config.agent_model if config.agent_model != "unknown-model" else None
+
+
+def _build_learning_provider(config: LongitudinalHarnessConfig) -> Any:
+    if config.executor_backend != "real-llm":
+        return None
+
+    from benchmark.longitudinal_llm_executor import build_longitudinal_learning_provider
+
+    return build_longitudinal_learning_provider(
+        model=_resolved_model_name(config),
+        base_url=config.llm_base_url,
+    )
+
+
+def _build_episode_executor(
+    records: list[Any],
+    config: LongitudinalHarnessConfig,
+    *,
+    forge: Any = None,
+) -> EpisodeExecutor:
+    if config.executor_backend == "deterministic":
+        from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
+
+        return DeterministicBaselineExecutor(records)
+
+    if config.executor_backend == "real-llm":
+        from benchmark.longitudinal_llm_executor import LLMEpisodeExecutor
+
+        return LLMEpisodeExecutor(
+            records,
+            agent_model=_resolved_model_name(config),
+            forge=forge,
+            base_url=config.llm_base_url,
+            timeout_seconds=config.llm_timeout_seconds,
+            no_think=config.no_think,
+        )
+
+    raise ValueError(f"Unsupported executor backend: {config.executor_backend}")
+
+
 def run_baseline_longitudinal_harness(
     *,
     config: LongitudinalHarnessConfig,
     output_dir: str | Path | None = None,
 ) -> LongitudinalHarnessRun:
-    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
-
     records = load_task_family_records(config.dataset_path)
-    executor = DeterministicBaselineExecutor(records)
+    executor = _build_episode_executor(records, config)
     return run_longitudinal_harness(
         executor=executor,
         config=config,
@@ -539,11 +686,10 @@ def run_observer_longitudinal_harness(
     config: LongitudinalHarnessConfig,
     output_dir: str | Path | None = None,
 ) -> LongitudinalHarnessRun:
-    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
     from benchmark.longitudinal_observer import apply_observer_only_integration
 
     records = load_task_family_records(config.dataset_path)
-    executor = DeterministicBaselineExecutor(records)
+    executor = _build_episode_executor(records, config)
     plan = build_episode_plan(
         records,
         stream_id=config.stream_id,
@@ -565,6 +711,7 @@ def run_observer_longitudinal_harness(
         data_dir=observer_data_dir,
         min_frequency=config.observer_min_frequency,
         min_confidence=config.observer_min_confidence,
+        llm_provider=_build_learning_provider(config),
     )
     results = list(observer_result.results)
     summary = summarize_episode_results(results)
@@ -577,6 +724,7 @@ def run_observer_longitudinal_harness(
             plan=plan,
             results=results,
             summary=summary,
+            episode_debug_rows=[],
             events=list(observer_result.events),
             learning_cycles=list(observer_result.learning_cycles),
             corrections_count=observer_result.corrections_count,
@@ -599,11 +747,10 @@ def run_cannyforge_online_longitudinal_harness(
     config: LongitudinalHarnessConfig,
     output_dir: str | Path | None = None,
 ) -> LongitudinalHarnessRun:
-    from benchmark.longitudinal_baseline import DeterministicBaselineExecutor
     from benchmark.longitudinal_observer import apply_cannyforge_online_integration
+    from benchmark.longitudinal_observer import apply_observer_only_integration
 
     records = load_task_family_records(config.dataset_path)
-    executor = DeterministicBaselineExecutor(records)
     plan = build_episode_plan(
         records,
         stream_id=config.stream_id,
@@ -612,21 +759,109 @@ def run_cannyforge_online_longitudinal_harness(
         evaluation_count=config.evaluation_count,
         seed=config.seed,
     )
+    baseline_executor = _build_episode_executor(records, config)
     baseline_results = run_episode_plan(
         plan,
-        executor=executor,
+        executor=baseline_executor,
         agent_model=config.agent_model,
         condition="baseline",
     )
     online_data_dir = Path(output_dir) / "learning_state" if output_dir is not None else None
-    online_result = apply_cannyforge_online_integration(
-        results=baseline_results,
-        records=records,
-        data_dir=online_data_dir,
-        min_frequency=config.observer_min_frequency,
-        min_confidence=config.observer_min_confidence,
-    )
-    results = list(online_result.results)
+    learning_provider = _build_learning_provider(config)
+
+    if config.executor_backend != "real-llm":
+        online_result = apply_cannyforge_online_integration(
+            results=baseline_results,
+            records=records,
+            data_dir=online_data_dir,
+            min_frequency=config.observer_min_frequency,
+            min_confidence=config.observer_min_confidence,
+            llm_provider=learning_provider,
+        )
+        results = list(online_result.results)
+        events = list(online_result.events)
+        learning_cycles = list(online_result.learning_cycles)
+        corrections_count = online_result.corrections_count
+        episode_debug_rows: list[dict[str, Any]] = []
+    else:
+        observer_result = apply_observer_only_integration(
+            results=baseline_results,
+            records=records,
+            data_dir=online_data_dir,
+            min_frequency=config.observer_min_frequency,
+            min_confidence=config.observer_min_confidence,
+            llm_provider=learning_provider,
+        )
+        if observer_result.forge is None:
+            raise RuntimeError("Observer-only live run did not return a forge state")
+
+        online_executor = _build_episode_executor(records, config, forge=observer_result.forge)
+        evaluation_plan = [episode for episode in plan if episode.window == "evaluation"]
+        live_evaluation_results = run_episode_plan(
+            evaluation_plan,
+            executor=online_executor,
+            agent_model=config.agent_model,
+            condition="cannyforge_online",
+        )
+        live_debug_by_id = dict(getattr(online_executor, "episode_debug_records", {}))
+        live_evaluation_by_id = {
+            result.episode_id: result for result in live_evaluation_results
+        }
+        baseline_by_id = {result.episode_id: result for result in baseline_results}
+        events = list(observer_result.events)
+        learning_cycles = list(observer_result.learning_cycles)
+        corrections_count = observer_result.corrections_count
+        results = []
+
+        for observer_result_item in observer_result.results:
+            if observer_result_item.window != "evaluation":
+                results.append(replace(observer_result_item, condition="cannyforge_online"))
+                continue
+
+            live_result = live_evaluation_by_id[observer_result_item.episode_id]
+            baseline_result = baseline_by_id[observer_result_item.episode_id]
+            effective = live_result.correction_injected_count > 0 and (
+                live_result.task_succeeded != baseline_result.task_succeeded
+                or live_result.num_retries < baseline_result.num_retries
+                or live_result.num_failed_tool_calls < baseline_result.num_failed_tool_calls
+            )
+            results.append(
+                replace(
+                    live_result,
+                    condition="cannyforge_online",
+                    learning_artifacts_available=corrections_count,
+                    effective_injection_count=(
+                        live_result.correction_injected_count if effective else 0
+                    ),
+                )
+            )
+            events.append(
+                {
+                    "event_type": (
+                        "activation_applied"
+                        if live_result.correction_injected_count > 0
+                        else "activation_skipped"
+                    ),
+                    "episode_id": live_result.episode_id,
+                    "window": live_result.window,
+                    "task_variant_id": live_result.task_variant_id,
+                    "learning_artifacts_available": corrections_count,
+                    "correction_injected_count": live_result.correction_injected_count,
+                    "rules_applied_count": live_result.rules_applied_count,
+                    "correction_ids": list(live_debug_by_id.get(live_result.episode_id, {}).get("correction_ids", [])),
+                    "rule_ids": list(live_debug_by_id.get(live_result.episode_id, {}).get("rule_ids", [])),
+                    "effective": effective,
+                }
+            )
+
+        episode_debug_rows = _build_live_episode_debug_rows(
+            results=results,
+            baseline_by_id=baseline_by_id,
+            events=events,
+            live_debug_by_id=live_debug_by_id,
+            forge=observer_result.forge,
+        )
+
     summary = summarize_episode_results(results)
 
     artifact_dir = None
@@ -637,9 +872,10 @@ def run_cannyforge_online_longitudinal_harness(
             plan=plan,
             results=results,
             summary=summary,
-            events=list(online_result.events),
-            learning_cycles=list(online_result.learning_cycles),
-            corrections_count=online_result.corrections_count,
+            episode_debug_rows=episode_debug_rows,
+            events=events,
+            learning_cycles=learning_cycles,
+            corrections_count=corrections_count,
         )
 
     return LongitudinalHarnessRun(
@@ -647,9 +883,9 @@ def run_cannyforge_online_longitudinal_harness(
         plan=tuple(plan),
         results=tuple(results),
         summary=summary,
-        events=online_result.events,
-        learning_cycles=online_result.learning_cycles,
-        corrections_count=online_result.corrections_count,
+        events=tuple(events),
+        learning_cycles=tuple(learning_cycles),
+        corrections_count=corrections_count,
         artifact_dir=artifact_dir,
     )
 
@@ -679,6 +915,10 @@ def run_longitudinal_condition_suite(
             evaluation_count=config.evaluation_count,
             seed=config.seed,
             agent_model=config.agent_model,
+            executor_backend=config.executor_backend,
+            llm_base_url=config.llm_base_url,
+            llm_timeout_seconds=config.llm_timeout_seconds,
+            no_think=config.no_think,
             condition=condition,
             observer_min_frequency=config.observer_min_frequency,
             observer_min_confidence=config.observer_min_confidence,
@@ -725,6 +965,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0, help="Deterministic plan seed")
     parser.add_argument("--model", default="unknown-model", help="Agent model label")
     parser.add_argument(
+        "--executor",
+        choices=["deterministic", "real-llm"],
+        default="deterministic",
+        help="Episode execution backend",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="Override OpenAI-compatible base URL for live execution",
+    )
+    parser.add_argument(
+        "--llm-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Per-episode timeout in seconds for live execution",
+    )
+    parser.add_argument(
+        "--no-think",
+        action="store_true",
+        help="Prepend /no_think when the live model supports it",
+    )
+    parser.add_argument(
         "--condition",
         choices=["baseline", "observer_only", "cannyforge_online"],
         default="baseline",
@@ -767,6 +1029,10 @@ def main(argv: list[str] | None = None) -> int:
         evaluation_count=args.evaluation_count,
         seed=args.seed,
         agent_model=args.model,
+        executor_backend=args.executor,
+        llm_base_url=args.llm_base_url,
+        llm_timeout_seconds=args.llm_timeout_seconds,
+        no_think=args.no_think,
         condition=args.condition,
         observer_min_frequency=args.observer_min_frequency,
         observer_min_confidence=args.observer_min_confidence,

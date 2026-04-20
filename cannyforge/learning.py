@@ -7,6 +7,7 @@ Pattern detection that generates actionable rules with proper validation
 import logging
 import json
 import math
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
@@ -31,9 +32,11 @@ class ErrorRecord:
     error_message: str
     context_snapshot: Dict[str, Any] = field(default_factory=dict)
     rules_applied: List[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: f"err_{uuid.uuid4().hex}")
 
     def to_dict(self) -> Dict:
         return {
+            'id': self.id,
             'timestamp': self.timestamp.isoformat(),
             'skill': self.skill_name,
             'task': self.task_description,
@@ -46,6 +49,7 @@ class ErrorRecord:
     @classmethod
     def from_dict(cls, data: Dict) -> 'ErrorRecord':
         return cls(
+            id=data.get('id', f"err_{uuid.uuid4().hex}"),
             timestamp=datetime.fromisoformat(data['timestamp']),
             skill_name=data['skill'],
             task_description=data['task'],
@@ -892,6 +896,8 @@ class LearningEngine:
 
             for error_type, type_errors in unclassified_by_type.items():
                 if len(type_errors) < 5:
+                    continue
+                if error_type in RuleGenerator.PATTERN_LIBRARY:
                     continue
                 examples = [e.to_dict() for e in type_errors[:5]]
                 suggested = RuleGenerator.suggest_pattern(

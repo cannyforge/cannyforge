@@ -23,7 +23,7 @@ import threading
 from time import time
 from typing import Any, Dict, List, Optional
 
-from cannyforge.failures import runtime_supports_error
+from cannyforge.failures import get_failure_class_for_error, get_failure_definition, runtime_supports_error
 
 try:
     from langgraph.prebuilt.chat_agent_executor import AgentState
@@ -110,6 +110,46 @@ class CannyForgeMiddleware:
     def _task_corrections_injected(self, value: List[str]):
         self._local.task_corrections_injected = value
 
+    @property
+    def _task_injection_signatures(self) -> set[str]:
+        return getattr(self._local, 'task_injection_signatures', set())
+
+    @_task_injection_signatures.setter
+    def _task_injection_signatures(self, value: set[str]):
+        self._local.task_injection_signatures = value
+
+    @property
+    def _task_seen_correction_ids(self) -> set[str]:
+        return getattr(self._local, 'task_seen_correction_ids', set())
+
+    @_task_seen_correction_ids.setter
+    def _task_seen_correction_ids(self, value: set[str]):
+        self._local.task_seen_correction_ids = value
+
+    @property
+    def _task_debug_records(self) -> List[Dict[str, Any]]:
+        return getattr(self._local, 'task_debug_records', [])
+
+    @_task_debug_records.setter
+    def _task_debug_records(self, value: List[Dict[str, Any]]):
+        self._local.task_debug_records = value
+
+    @property
+    def _task_observed_errors(self) -> List[Dict[str, Any]]:
+        return getattr(self._local, 'task_observed_errors', [])
+
+    @_task_observed_errors.setter
+    def _task_observed_errors(self, value: List[Dict[str, Any]]):
+        self._local.task_observed_errors = value
+
+    @property
+    def _task_state_defaults(self) -> Dict[str, Any]:
+        return getattr(self._local, 'task_state_defaults', {})
+
+    @_task_state_defaults.setter
+    def _task_state_defaults(self, value: Dict[str, Any]):
+        self._local.task_state_defaults = value
+
     def begin_task(self) -> None:
         """Reset cumulative per-task middleware state before an agent run."""
         self._last_context = {}
@@ -117,6 +157,52 @@ class CannyForgeMiddleware:
         self._corrections_injected = []
         self._task_rules_applied = []
         self._task_corrections_injected = []
+        self._task_injection_signatures = set()
+        self._task_seen_correction_ids = set()
+        self._task_debug_records = []
+        self._task_observed_errors = []
+        self._task_state_defaults = {}
+
+    def set_task_defaults(self, defaults: Optional[Dict[str, Any]]) -> None:
+        """Persist task-level defaults for runtimes that drop custom state channels."""
+        self._task_state_defaults = dict(defaults or {})
+
+    @staticmethod
+    def _prefer_runtime_value(runtime_value: Any, fallback_value: Any) -> Any:
+        if runtime_value is None:
+            return fallback_value
+        if isinstance(runtime_value, str) and not runtime_value.strip():
+            return fallback_value
+        if isinstance(runtime_value, (list, tuple, set, dict)) and not runtime_value:
+            return fallback_value
+        return runtime_value
+
+    def _merge_task_defaults(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        defaults = dict(self._task_state_defaults or {})
+        if not defaults:
+            return dict(state_dict)
+
+        merged = dict(defaults)
+        merged.update(state_dict)
+
+        default_metadata = defaults.get("metadata", {}) or {}
+        runtime_metadata = state_dict.get("metadata", {}) or {}
+        merged["metadata"] = {**default_metadata, **runtime_metadata}
+
+        for key in (
+            "scenario_domain",
+            "task_family",
+            "transfer_cluster",
+            "available_tools",
+            "required_steps",
+            "completed_steps",
+            "completed_tools",
+            "prerequisite_map",
+            "final_answer_started",
+        ):
+            merged[key] = self._prefer_runtime_value(state_dict.get(key), defaults.get(key))
+
+        return merged
 
     def _state_to_context(self, state: Any) -> Dict[str, Any]:
         """Convert LangGraph AgentState to CannyForge context dict.
@@ -130,6 +216,8 @@ class CannyForgeMiddleware:
             state_dict = state.__dict__
         else:
             state_dict = {}
+
+        state_dict = self._merge_task_defaults(state_dict)
 
         messages = state_dict.get("messages", [])
         task_description = ""
@@ -194,6 +282,9 @@ class CannyForgeMiddleware:
         if "available_tools" in state_dict:
             observed_signals.add("available_tools")
 
+        task_family = str(state_dict.get("task_family", "") or "")
+        transfer_cluster = str(state_dict.get("transfer_cluster", "") or "")
+
         required_steps = list(state_dict.get("required_steps", []) or [])
         completed_steps = list(state_dict.get("completed_steps", []) or [])
         if "required_steps" in state_dict:
@@ -205,11 +296,34 @@ class CannyForgeMiddleware:
         if "prerequisite_map" in state_dict:
             observed_signals.add("prerequisite_map")
 
-        upstream_artifacts = list(state_dict.get("upstream_artifacts", []) or [])
-        consumed_artifacts = list(state_dict.get("consumed_artifacts", []) or [])
-        if "upstream_artifacts" in state_dict:
+        inferred_requires_prior_context = False
+        inferred_upstream_artifacts: List[str] = []
+        inferred_consumed_artifacts: List[str] = []
+        if (
+            transfer_cluster.startswith("context_gate_before_")
+            and attempted_tool
+            and attempted_tool in prerequisite_map
+        ):
+            expected_prerequisites = list(prerequisite_map.get(attempted_tool, []))
+            completed_prerequisites = [
+                prereq for prereq in expected_prerequisites
+                if prereq in set(completed_tools)
+            ]
+            if expected_prerequisites:
+                inferred_requires_prior_context = True
+                inferred_upstream_artifacts = [
+                    f"{prereq}_output" for prereq in expected_prerequisites
+                ]
+
+        upstream_artifacts = list(
+            state_dict.get("upstream_artifacts", []) or inferred_upstream_artifacts
+        )
+        consumed_artifacts = list(
+            state_dict.get("consumed_artifacts", []) or inferred_consumed_artifacts
+        )
+        if "upstream_artifacts" in state_dict or inferred_requires_prior_context:
             observed_signals.add("upstream_artifacts")
-        if "consumed_artifacts" in state_dict:
+        if "consumed_artifacts" in state_dict or inferred_requires_prior_context:
             observed_signals.add("consumed_artifacts")
 
         final_answer_started = self._derive_final_answer_started(messages)
@@ -246,19 +360,37 @@ class CannyForgeMiddleware:
         if "hallucinated_tool_detected" in state_dict or hallucinated_tool_detected:
             observed_signals.add("hallucinated_tool_detected")
 
-        requires_prior_context = bool(state_dict.get("requires_prior_context", False))
-        has_prior_context = bool(state_dict.get("has_prior_context", False))
-        if "requires_prior_context" in state_dict:
+        explicit_requires_prior_context = state_dict.get("requires_prior_context")
+        explicit_has_prior_context = state_dict.get("has_prior_context")
+        requires_prior_context = (
+            bool(explicit_requires_prior_context)
+            if explicit_requires_prior_context is not None
+            else inferred_requires_prior_context
+        )
+        has_prior_context = (
+            bool(explicit_has_prior_context)
+            if explicit_has_prior_context is not None
+            else bool(consumed_artifacts)
+        )
+        if "requires_prior_context" in state_dict or inferred_requires_prior_context:
             observed_signals.add("requires_prior_context")
-        if "has_prior_context" in state_dict:
+        if "has_prior_context" in state_dict or inferred_requires_prior_context:
             observed_signals.add("has_prior_context")
+
+        tool_match_confidence = self._infer_tool_match_confidence(
+            state_dict=state_dict,
+            attempted_tool=attempted_tool,
+            selected_tool=selected_tool,
+            required_steps=required_steps,
+            available_tools=available_tools,
+        )
 
         return {
             "task": {"description": task_description},
             "context": {
                 "selected_tool": selected_tool,
                 "attempted_tool": attempted_tool,
-                "tool_match_confidence": state_dict.get("tool_match_confidence", 0.5),
+                "tool_match_confidence": tool_match_confidence,
                 "has_required_params": state_dict.get("has_required_params", True),
                 "has_type_mismatch": state_dict.get("has_type_mismatch", False),
                 "has_extra_params": state_dict.get("has_extra_params", False),
@@ -274,6 +406,8 @@ class CannyForgeMiddleware:
                 "missing_prerequisites": missing_prerequisites,
                 "final_answer_started": final_answer_started,
                 "available_tools": available_tools,
+                "task_family": task_family,
+                "transfer_cluster": transfer_cluster,
                 "last_failed_call_sig": last_failed_call_sig,
                 "current_call_sig": current_call_sig,
                 "upstream_artifacts": upstream_artifacts,
@@ -286,6 +420,32 @@ class CannyForgeMiddleware:
                 "suggestions": [],
             },
         }
+
+    @staticmethod
+    def _infer_tool_match_confidence(
+        *,
+        state_dict: Dict[str, Any],
+        attempted_tool: str,
+        selected_tool: str,
+        required_steps: List[str],
+        available_tools: List[str],
+    ) -> float:
+        explicit_confidence = state_dict.get("tool_match_confidence")
+        if explicit_confidence is not None:
+            return float(explicit_confidence)
+
+        tool_name = attempted_tool or selected_tool
+        if not tool_name:
+            return 1.0
+
+        expected_tools = set(required_steps)
+        if expected_tools:
+            return 0.95 if tool_name in expected_tools else 0.3
+
+        if available_tools:
+            return 0.7 if tool_name in set(available_tools) else 0.0
+
+        return 0.5
 
     def _resolve_active_skill_names(self, state_dict: Dict[str, Any]) -> List[str]:
         """Return the base skill plus the matching domain-scoped namespace."""
@@ -393,6 +553,131 @@ class CannyForgeMiddleware:
             return True
         observed_signals = context.get("context", {}).get("runtime_signals", [])
         return runtime_supports_error(error_type, observed_signals)
+
+    @staticmethod
+    def _is_runtime_sensitive_error_type(error_type: str) -> bool:
+        failure_class = get_failure_class_for_error(error_type)
+        if not failure_class:
+            return False
+        return bool(get_failure_definition(failure_class).runtime_signals_required)
+
+    @staticmethod
+    def _build_injection_signature(
+        corrections: List[Any],
+        rules: List[Any],
+        rule_warnings: List[str],
+        rule_suggestions: List[str],
+    ) -> str:
+        payload = {
+            "corrections": sorted(
+                getattr(correction, "id", correction.content) for correction in corrections
+            ),
+            "rules": sorted(getattr(rule, "id", "") for rule in rules if getattr(rule, "id", "")),
+            "warnings": sorted(rule_warnings),
+            "suggestions": sorted(rule_suggestions),
+        }
+        if not any(payload.values()):
+            return ""
+        return json.dumps(payload, sort_keys=True)
+
+    def _correction_priority(self, correction: Any) -> tuple[int, int, int, int]:
+        structured_scope = int(bool(getattr(correction, "trigger_transfer_clusters", [])))
+        family_scope = int(bool(getattr(correction, "trigger_task_families", [])))
+        keyword_scope = int(bool(getattr(correction, "trigger_keywords", [])))
+        runtime_sensitive = int(self._is_runtime_sensitive_error_type(getattr(correction, "error_type", "")))
+        return (runtime_sensitive, structured_scope, family_scope, keyword_scope)
+
+    def _select_corrections(
+        self,
+        raw_corrections: List[Any],
+        *,
+        context: Dict[str, Any],
+        task_description: str,
+    ) -> tuple[List[Any], List[Dict[str, Any]]]:
+        accepted: List[Any] = []
+        decisions: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        now = time()
+
+        for correction in raw_corrections:
+            correction_id = getattr(correction, "id", "")
+            if correction_id and correction_id in seen_ids:
+                decisions.append(
+                    {
+                        "correction_id": correction_id,
+                        "error_type": getattr(correction, "error_type", ""),
+                        "correction_type": getattr(correction, "correction_type", ""),
+                        "accepted": False,
+                        "reason": "duplicate",
+                    }
+                )
+                continue
+            if correction_id:
+                seen_ids.add(correction_id)
+
+            stale_ineffective = bool(
+                correction.times_injected >= MIN_INJECTIONS_FOR_DEPRECATION
+                and correction.effectiveness < MIN_EFFECTIVENESS_TO_KEEP
+                and (now - correction.created_at) > STALE_DAYS * 86400
+            )
+            if stale_ineffective:
+                decisions.append(
+                    {
+                        "correction_id": correction_id,
+                        "error_type": getattr(correction, "error_type", ""),
+                        "correction_type": getattr(correction, "correction_type", ""),
+                        "accepted": False,
+                        "reason": "stale_ineffective",
+                    }
+                )
+                continue
+
+            if not self._runtime_supports_error_type(correction.error_type, context):
+                decisions.append(
+                    {
+                        "correction_id": correction_id,
+                        "error_type": getattr(correction, "error_type", ""),
+                        "correction_type": getattr(correction, "correction_type", ""),
+                        "accepted": False,
+                        "reason": "runtime_unsupported",
+                    }
+                )
+                continue
+
+            context_matched = (
+                not hasattr(correction, "applies_to_context")
+                or correction.applies_to_context(context, task_description)
+            )
+            if not context_matched:
+                decisions.append(
+                    {
+                        "correction_id": correction_id,
+                        "error_type": getattr(correction, "error_type", ""),
+                        "correction_type": getattr(correction, "correction_type", ""),
+                        "accepted": False,
+                        "reason": "context_mismatch",
+                    }
+                )
+                continue
+
+            accepted.append(correction)
+            decisions.append(
+                {
+                    "correction_id": correction_id,
+                    "error_type": getattr(correction, "error_type", ""),
+                    "correction_type": getattr(correction, "correction_type", ""),
+                    "accepted": True,
+                    "reason": "accepted",
+                }
+            )
+
+        accepted.sort(key=self._correction_priority, reverse=True)
+        return accepted, decisions
+
+    def _append_task_debug_record(self, record: Dict[str, Any]) -> None:
+        debug_records = list(self._task_debug_records)
+        debug_records.append(record)
+        self._task_debug_records = debug_records
 
     @staticmethod
     def _get_message_type(msg: Any) -> str:
@@ -505,6 +790,10 @@ class CannyForgeMiddleware:
             self._task_rules_applied = []
         if not hasattr(self._local, 'task_corrections_injected'):
             self._task_corrections_injected = []
+        if not hasattr(self._local, 'task_injection_signatures'):
+            self._task_injection_signatures = set()
+        if not hasattr(self._local, 'task_seen_correction_ids'):
+            self._task_seen_correction_ids = set()
 
         if isinstance(state, dict):
             state_dict = state
@@ -512,27 +801,20 @@ class CannyForgeMiddleware:
             state_dict = state.__dict__
         else:
             state_dict = {}
+        merged_state_dict = self._merge_task_defaults(state_dict)
 
         # Always-on corrections (LangGraph correction path).
         # Pull from the base skill plus the active domain namespace only.
-        all_skill_names = self._resolve_active_skill_names(state_dict)
+        all_skill_names = self._resolve_active_skill_names(merged_state_dict)
         raw_corrections: List = []
         for sk in all_skill_names:
             raw_corrections.extend(self._forge.knowledge_base.get_corrections(sk))
-
-        now = time()
-        corrections = [
-            c for c in raw_corrections
-            if not (
-                c.times_injected >= MIN_INJECTIONS_FOR_DEPRECATION
-                and c.effectiveness < MIN_EFFECTIVENESS_TO_KEEP
-                and (now - c.created_at) > STALE_DAYS * 86400
-            )
-        ]
-        corrections = [
-            c for c in corrections
-            if self._runtime_supports_error_type(c.error_type, context)
-        ]
+        task_description = context.get("task", {}).get("description", "")
+        corrections, correction_decisions = self._select_corrections(
+            raw_corrections,
+            context=context,
+            task_description=task_description,
+        )
 
         # Conditional rules (backward-compatible path)
         applicable = []
@@ -569,19 +851,6 @@ class CannyForgeMiddleware:
         rule_suggestions = rule_ctx.get("suggestions", [])
 
         messages = list(state_dict.get("messages", []))
-
-        # First-turn guard: only inject on turn 1 or immediately after a tool error.
-        # On clean intermediate turns (model is mid-task, no error) skip injection so
-        # the correction text doesn't accumulate across ReAct steps.
-        ai_turns = sum(1 for m in messages if self._get_message_type(m) == "ai")
-        if ai_turns > 0:
-            last_turn_had_error = any(
-                self._extract_error(m)
-                for m in messages[-4:]  # check recent messages for tool errors
-            )
-            if not last_turn_had_error:
-                # Clean intermediate turn — skip injection, still return state
-                return {"messages": messages}
 
         # Build structured injection: group corrections by correction_type, then append rule warnings
         correction_sections: Dict[str, List[str]] = {}
@@ -625,9 +894,54 @@ class CannyForgeMiddleware:
                 correction_blocks.append(f"[{key}]\n{items}")
 
         all_rule_warnings = list(rule_warnings) + list(rule_suggestions)
+        injection_signature = self._build_injection_signature(
+            corrections,
+            applicable,
+            list(rule_warnings),
+            list(rule_suggestions),
+        )
+        runtime_sensitive_guidance = bool(
+            any(self._is_runtime_sensitive_error_type(c.error_type) for c in corrections)
+            or any(self._is_runtime_sensitive_error_type(rule.source_error_type) for rule in applicable)
+        )
+        ai_turns = sum(1 for m in messages if self._get_message_type(m) == "ai")
+        debug_record = {
+            "turn_index": ai_turns,
+            "task_description": task_description,
+            "attempted_tool": rule_ctx.get("attempted_tool", ""),
+            "selected_tool": rule_ctx.get("selected_tool", ""),
+            "runtime_signals": list(rule_ctx.get("runtime_signals", [])),
+            "sequence_violation_detected": bool(rule_ctx.get("sequence_violation_detected", False)),
+            "requires_prior_context": bool(rule_ctx.get("requires_prior_context", False)),
+            "has_prior_context": bool(rule_ctx.get("has_prior_context", False)),
+            "applicable_correction_ids": [getattr(correction, "id", "") for correction in corrections],
+            "correction_decisions": correction_decisions,
+            "applicable_rule_ids": [getattr(rule, "id", "") for rule in applicable],
+            "warnings": list(rule_warnings),
+            "suggestions": list(rule_suggestions),
+            "injected": False,
+            "skip_reason": "no_guidance",
+            "injection_text": None,
+        }
 
         all_warnings_exist = correction_blocks or all_rule_warnings
         if all_warnings_exist:
+            if ai_turns > 0:
+                last_turn_had_error = any(
+                    self._extract_error(m)
+                    for m in messages[-4:]
+                )
+                seen_signature = (
+                    bool(injection_signature)
+                    and injection_signature in self._task_injection_signatures
+                )
+                if not last_turn_had_error and not (
+                    runtime_sensitive_guidance and not seen_signature
+                ):
+                    debug_record["skip_reason"] = "clean_intermediate_turn"
+                    self._append_task_debug_record(debug_record)
+                    return {"messages": messages}
+
             parts = ["[CANNYFORGE] Learned rules for this request:"]
             parts.extend(correction_blocks)
             if all_rule_warnings:
@@ -640,13 +954,25 @@ class CannyForgeMiddleware:
                 injection = {"role": "system", "content": text}
 
             messages = [injection] + messages
+            if injection_signature:
+                self._task_injection_signatures.add(injection_signature)
+            debug_record["injected"] = True
+            debug_record["skip_reason"] = None
+            debug_record["injection_text"] = text
 
+            new_correction_recorded = False
             for correction in corrections:
-                self._forge.knowledge_base.record_correction_injection(correction.id)
                 self._corrections_injected.append(correction.id)
+                if correction.id in self._task_seen_correction_ids:
+                    continue
+                self._task_seen_correction_ids.add(correction.id)
+                self._forge.knowledge_base.record_correction_injection(correction.id)
                 self._task_corrections_injected.append(correction.id)
-            if corrections:
+                new_correction_recorded = True
+            if new_correction_recorded:
                 self._forge.knowledge_base.save_corrections()
+
+        self._append_task_debug_record(debug_record)
 
         metadata = state_dict.get("metadata", {}) or {}
         if rule_warnings:
@@ -681,12 +1007,32 @@ class CannyForgeMiddleware:
         messages = state_dict.get("messages", [])
         task_desc = self._last_context.get("task", {}).get("description", "")
         found_error = False
+        completed_tools, failed_tools, last_failed_call_sig = self._derive_tool_history(messages)
+
+        if completed_tools:
+            state_dict["completed_tools"] = completed_tools
+            state_dict["completed_steps"] = completed_tools
+        if failed_tools:
+            state_dict["failed_tools"] = failed_tools
+        if last_failed_call_sig:
+            state_dict["last_failed_call_sig"] = last_failed_call_sig
 
         for msg in messages:
             error = self._extract_error(msg)
             if error:
                 found_error = True
                 error_type = self._forge._classify_error(str(error))
+                observed_errors = list(self._task_observed_errors)
+                observed_errors.append(
+                    {
+                        "error_type": error_type,
+                        "error_message": str(error),
+                        "completed_tools": list(completed_tools),
+                        "failed_tools": list(failed_tools),
+                        "last_failed_call_sig": last_failed_call_sig,
+                    }
+                )
+                self._task_observed_errors = observed_errors
                 self._forge.learning_engine.record_error(
                     skill_name=self._skill_name,
                     task_description=task_desc,
@@ -732,6 +1078,8 @@ class CannyForgeMiddleware:
         self._forge.knowledge_base.save_corrections()
         self._task_corrections_injected = []
         self._task_rules_applied = []
+        self._task_seen_correction_ids = set()
+        self._task_injection_signatures = set()
         self._corrections_injected = []
         self._rules_applied = []
         logger.debug(
@@ -776,3 +1124,13 @@ class CannyForgeMiddleware:
     def task_corrections_injected(self) -> List[str]:
         """Return the full list of correction IDs injected across the current task."""
         return list(self._task_corrections_injected)
+
+    @property
+    def task_debug_records(self) -> List[Dict[str, Any]]:
+        """Return turn-level middleware debug records for the current task."""
+        return [dict(record) for record in self._task_debug_records]
+
+    @property
+    def task_observed_errors(self) -> List[Dict[str, Any]]:
+        """Return observed tool/runtime errors for the current task."""
+        return [dict(record) for record in self._task_observed_errors]

@@ -27,6 +27,7 @@ class ObserverIntegrationResult:
     events: tuple[dict[str, Any], ...]
     learning_cycles: tuple[dict[str, Any], ...]
     corrections_count: int
+    forge: CannyForge | None = None
 
 
 def _skill_name_for_domain(domain: str, skill_prefix: str) -> str:
@@ -176,6 +177,7 @@ def _observe_windows(
     min_confidence: float,
     skill_prefix: str,
     condition: str,
+    llm_provider: Any = None,
 ) -> tuple[list[EpisodeResult], list[dict[str, Any]], list[dict[str, Any]], int]:
     updated_results: list[EpisodeResult] = []
     events: list[dict[str, Any]] = []
@@ -209,6 +211,7 @@ def _observe_windows(
                         error_message=f"Observed benchmark failure: {raw_failure_class}",
                         context_snapshot={
                             "task_family": result.task_family,
+                            "transfer_cluster": record.transfer_cluster,
                             "task_variant_id": result.task_variant_id,
                             "window": result.window,
                             "final_outcome": result.final_outcome,
@@ -238,6 +241,8 @@ def _observe_windows(
                         trace_context={
                             "environment_state": result.environment_state,
                             "domain": result.domain,
+                            "task_family": result.task_family,
+                            "transfer_cluster": record.transfer_cluster,
                         },
                         scenario_id=result.episode_id,
                         legacy_error_type=legacy_error_type,
@@ -248,6 +253,7 @@ def _observe_windows(
                     task_description=record.user_request,
                     context_snapshot={
                         "task_family": result.task_family,
+                        "transfer_cluster": record.transfer_cluster,
                         "task_variant_id": result.task_variant_id,
                         "window": result.window,
                     },
@@ -273,6 +279,7 @@ def _observe_windows(
             metrics = forge.run_learning_cycle(
                 min_frequency=min_frequency,
                 min_confidence=min_confidence,
+                llm_provider=llm_provider,
             )
             available_corrections, total_rules = _knowledge_counts(forge)
             cycle_event = {
@@ -299,8 +306,9 @@ def _apply_observer_only_integration(
     min_frequency: int,
     min_confidence: float,
     skill_prefix: str,
+    llm_provider: Any = None,
 ) -> ObserverIntegrationResult:
-    forge = CannyForge(data_dir=data_dir, async_learning=False)
+    forge = CannyForge(data_dir=data_dir, async_learning=False, llm_provider=llm_provider)
     records_by_variant = {record.variant_id: record for record in records}
     updated_results, events, learning_cycles, available_corrections = _observe_windows(
         forge=forge,
@@ -310,6 +318,7 @@ def _apply_observer_only_integration(
         min_confidence=min_confidence,
         skill_prefix=skill_prefix,
         condition="observer_only",
+        llm_provider=llm_provider,
     )
 
     return ObserverIntegrationResult(
@@ -317,6 +326,7 @@ def _apply_observer_only_integration(
         events=tuple(events),
         learning_cycles=tuple(learning_cycles),
         corrections_count=available_corrections,
+        forge=forge,
     )
 
 
@@ -328,6 +338,7 @@ def apply_observer_only_integration(
     min_frequency: int = 3,
     min_confidence: float = 0.5,
     skill_prefix: str = "tool_use",
+    llm_provider: Any = None,
 ) -> ObserverIntegrationResult:
     if data_dir is not None:
         return _apply_observer_only_integration(
@@ -337,6 +348,7 @@ def apply_observer_only_integration(
             min_frequency=min_frequency,
             min_confidence=min_confidence,
             skill_prefix=skill_prefix,
+            llm_provider=llm_provider,
         )
 
     with TemporaryDirectory(prefix="cannyforge_longitudinal_observer_") as temp_dir:
@@ -347,6 +359,7 @@ def apply_observer_only_integration(
             min_frequency=min_frequency,
             min_confidence=min_confidence,
             skill_prefix=skill_prefix,
+            llm_provider=llm_provider,
         )
 
 
@@ -358,8 +371,9 @@ def _apply_cannyforge_online_integration(
     min_frequency: int,
     min_confidence: float,
     skill_prefix: str,
+    llm_provider: Any = None,
 ) -> ObserverIntegrationResult:
-    forge = CannyForge(data_dir=data_dir, async_learning=False)
+    forge = CannyForge(data_dir=data_dir, async_learning=False, llm_provider=llm_provider)
     records_by_variant = {record.variant_id: record for record in records}
     observed_results, events, learning_cycles, available_corrections = _observe_windows(
         forge=forge,
@@ -369,6 +383,7 @@ def _apply_cannyforge_online_integration(
         min_confidence=min_confidence,
         skill_prefix=skill_prefix,
         condition="cannyforge_online",
+        llm_provider=llm_provider,
     )
 
     activated_results: list[EpisodeResult] = []
@@ -468,6 +483,7 @@ def _apply_cannyforge_online_integration(
         events=tuple(events),
         learning_cycles=tuple(learning_cycles),
         corrections_count=available_corrections,
+        forge=forge,
     )
 
 
@@ -479,6 +495,7 @@ def apply_cannyforge_online_integration(
     min_frequency: int = 3,
     min_confidence: float = 0.5,
     skill_prefix: str = "tool_use",
+    llm_provider: Any = None,
 ) -> ObserverIntegrationResult:
     if data_dir is not None:
         return _apply_cannyforge_online_integration(
@@ -488,6 +505,7 @@ def apply_cannyforge_online_integration(
             min_frequency=min_frequency,
             min_confidence=min_confidence,
             skill_prefix=skill_prefix,
+            llm_provider=llm_provider,
         )
 
     with TemporaryDirectory(prefix="cannyforge_longitudinal_online_") as temp_dir:
@@ -498,4 +516,5 @@ def apply_cannyforge_online_integration(
             min_frequency=min_frequency,
             min_confidence=min_confidence,
             skill_prefix=skill_prefix,
+            llm_provider=llm_provider,
         )

@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -29,6 +29,9 @@ class Correction:
     times_injected: int = 0
     times_effective: int = 0
     correction_type: str = ""  # e.g. "sequence", "retry", "hallucination", "tool_selection"
+    trigger_keywords: List[str] = field(default_factory=list)
+    trigger_task_families: List[str] = field(default_factory=list)
+    trigger_transfer_clusters: List[str] = field(default_factory=list)
 
     @property
     def effectiveness(self) -> float:
@@ -48,6 +51,9 @@ class Correction:
             "times_injected": self.times_injected,
             "times_effective": self.times_effective,
             "correction_type": self.correction_type,
+            "trigger_keywords": list(self.trigger_keywords),
+            "trigger_task_families": list(self.trigger_task_families),
+            "trigger_transfer_clusters": list(self.trigger_transfer_clusters),
         }
 
     @classmethod
@@ -62,7 +68,28 @@ class Correction:
             times_injected=int(data.get("times_injected", 0)),
             times_effective=int(data.get("times_effective", 0)),
             correction_type=data.get("correction_type", ""),
+            trigger_keywords=list(data.get("trigger_keywords", [])),
+            trigger_task_families=list(data.get("trigger_task_families", [])),
+            trigger_transfer_clusters=list(data.get("trigger_transfer_clusters", [])),
         )
+
+    def applies_to_context(self, context: Dict[str, Any], task_description: str) -> bool:
+        runtime_context = context.get("context", {}) if isinstance(context, dict) else {}
+        runtime_transfer_cluster = str(runtime_context.get("transfer_cluster", "") or "").strip()
+        if self.trigger_transfer_clusters and runtime_transfer_cluster:
+            return runtime_transfer_cluster in set(self.trigger_transfer_clusters)
+
+        runtime_task_family = str(runtime_context.get("task_family", "") or "").strip()
+        if self.trigger_task_families and runtime_task_family:
+            return runtime_task_family in set(self.trigger_task_families)
+
+        if not self.trigger_keywords:
+            return True
+        task_tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", (task_description or "").lower()))
+        return any(keyword in task_tokens for keyword in self.trigger_keywords)
+
+    def applies_to(self, task_description: str) -> bool:
+        return self.applies_to_context({}, task_description)
 
 
 class CorrectionGenerator:
@@ -104,8 +131,9 @@ class CorrectionGenerator:
 
         provider = llm_provider or self._llm
         content = ""
+        correction_type = self._resolve_correction_type(error_type, failure_list)
 
-        if provider:
+        if provider and not self._prefer_template(correction_type):
             content = self._generate_with_llm(
                 skill_name,
                 error_type,
@@ -124,8 +152,57 @@ class CorrectionGenerator:
             content=content,
             source_errors=self._source_error_ids(error_list or failure_list),
             created_at=time(),
-            correction_type=self._resolve_correction_type(error_type, failure_list),
+            correction_type=correction_type,
+            trigger_keywords=self._derive_trigger_keywords(error_list, failure_list),
+            trigger_task_families=self._derive_trigger_task_families(error_list, failure_list),
+            trigger_transfer_clusters=self._derive_trigger_transfer_clusters(error_list, failure_list),
         )
+
+    def _prefer_template(self, correction_type: str) -> bool:
+        return correction_type in {"prerequisite", "completion"}
+
+    def _derive_trigger_keywords(self,
+                                 errors: List[Any],
+                                 failures: List[Any]) -> List[str]:
+        tasks = [getattr(err, "task_description", "") for err in errors if getattr(err, "task_description", "")]
+        tasks.extend(
+            getattr(failure, "task_description", "")
+            for failure in failures
+            if getattr(failure, "task_description", "")
+        )
+        return self._common_keywords(tasks, max_count=5)
+
+    def _derive_trigger_task_families(self,
+                                      errors: List[Any],
+                                      failures: List[Any]) -> List[str]:
+        task_families = []
+        for err in errors:
+            snapshot = getattr(err, "context_snapshot", {}) or {}
+            task_family = snapshot.get("task_family")
+            if task_family and task_family not in task_families:
+                task_families.append(str(task_family))
+        for failure in failures:
+            trace_context = getattr(failure, "trace_context", {}) or {}
+            task_family = trace_context.get("task_family")
+            if task_family and task_family not in task_families:
+                task_families.append(str(task_family))
+        return task_families
+
+    def _derive_trigger_transfer_clusters(self,
+                                          errors: List[Any],
+                                          failures: List[Any]) -> List[str]:
+        transfer_clusters = []
+        for err in errors:
+            snapshot = getattr(err, "context_snapshot", {}) or {}
+            transfer_cluster = snapshot.get("transfer_cluster")
+            if transfer_cluster and transfer_cluster not in transfer_clusters:
+                transfer_clusters.append(str(transfer_cluster))
+        for failure in failures:
+            trace_context = getattr(failure, "trace_context", {}) or {}
+            transfer_cluster = trace_context.get("transfer_cluster")
+            if transfer_cluster and transfer_cluster not in transfer_clusters:
+                transfer_clusters.append(str(transfer_cluster))
+        return transfer_clusters
 
     def _resolve_correction_type(self,
                                  error_type: str,
@@ -203,6 +280,14 @@ class CorrectionGenerator:
                 expected_tools.append(str(tool_name))
         return expected_tools
 
+    def _expected_sequence_from_failures(self, failures: List[Any]) -> List[str]:
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            sequence = expected.get("expected_sequence") or expected.get("required_tools") or []
+            if sequence:
+                return [str(tool_name) for tool_name in sequence if tool_name]
+        return []
+
     def _tokenize(self, text: str) -> List[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", text.lower())
         return [t for t in tokens if len(t) > 2 and t not in self._STOPWORDS]
@@ -231,6 +316,17 @@ class CorrectionGenerator:
         family = self._resolve_correction_type(error_type, failure_list)
 
         if family == "prerequisite":
+            expected_sequence = self._expected_sequence_from_failures(failure_list)
+            if len(expected_sequence) >= 2:
+                prerequisite_steps = expected_sequence[:-1]
+                dependent_tool = expected_sequence[-1]
+                prerequisite_phrase = ", ".join(f"`{tool_name}`" for tool_name in prerequisite_steps)
+                carry_source = prerequisite_steps[-1]
+                return (
+                    f"Before calling `{dependent_tool}`, first complete {prerequisite_phrase} and carry forward the "
+                    f"context it retrieves. Do not continue to `{dependent_tool}` until `{carry_source}` has succeeded "
+                    "and its output is available to the next step."
+                )
             return (
                 "Retrieve and carry forward the required prior context before using dependent tools. "
                 "Do not continue until the upstream read, fetch, or validation step has completed."
@@ -347,17 +443,58 @@ class CorrectionGenerator:
             )
             response = llm_provider.generate(request)
 
-            if isinstance(response.content, dict):
-                text = response.content.get("correction") or response.content.get("content")
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-
-            if isinstance(response.content, str) and response.content.strip():
-                return response.content.strip()
-
-            if isinstance(response.raw_response, str) and response.raw_response.strip():
-                return response.raw_response.strip()
+            text = self._extract_llm_correction_text(response)
+            if text:
+                return text
         except Exception as exc:
             logger.warning("LLM correction generation failed, using template fallback: %s", exc)
+
+        return ""
+
+    def _extract_llm_correction_text(self, response: Any) -> str:
+        candidates: List[str] = []
+
+        content = getattr(response, "content", None)
+        raw_response = getattr(response, "raw_response", None)
+
+        if isinstance(content, dict):
+            direct = content.get("correction") or content.get("rule")
+            nested = content.get("content")
+            if isinstance(direct, str) and direct.strip():
+                return direct.strip()
+            if isinstance(nested, dict):
+                nested_text = nested.get("correction") or nested.get("rule") or nested.get("body")
+                if isinstance(nested_text, str) and nested_text.strip():
+                    return nested_text.strip()
+            if isinstance(nested, str) and nested.strip():
+                candidates.append(nested.strip())
+
+        elif isinstance(content, str) and content.strip():
+            candidates.append(content.strip())
+
+        if isinstance(raw_response, str) and raw_response.strip():
+            candidates.append(raw_response.strip())
+
+        for candidate in candidates:
+            normalized = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate.strip(), flags=re.IGNORECASE)
+            try:
+                parsed = json.loads(normalized)
+            except json.JSONDecodeError:
+                parsed = None
+
+            if isinstance(parsed, dict):
+                direct = parsed.get("correction") or parsed.get("rule")
+                nested = parsed.get("content")
+                if isinstance(direct, str) and direct.strip():
+                    return direct.strip()
+                if isinstance(nested, dict):
+                    nested_text = nested.get("correction") or nested.get("rule") or nested.get("body")
+                    if isinstance(nested_text, str) and nested_text.strip():
+                        return nested_text.strip()
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+
+            if normalized and not normalized.startswith("{"):
+                return normalized.strip()
 
         return ""
