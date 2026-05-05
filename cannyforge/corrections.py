@@ -320,17 +320,6 @@ class CorrectionGenerator:
             if len(expected_sequence) >= 2:
                 prerequisite_steps = expected_sequence[:-1]
                 dependent_tool = expected_sequence[-1]
-                if (
-                    dependent_tool == "generate_client_report"
-                    and prerequisite_steps[-1] == "fetch_client_portfolio"
-                ):
-                    return (
-                        "Before calling `generate_client_report`, first complete `fetch_client_portfolio`. "
-                        "Carry forward and reuse the fetched client/account identifier verbatim as `client_id_or_name` in "
-                        "`generate_client_report`; do not shorten, paraphrase, or rename the account. "
-                        "Do not continue to `generate_client_report` until the fetched portfolio output is "
-                        "available to the next step."
-                    )
                 prerequisite_phrase = ", ".join(f"`{tool_name}`" for tool_name in prerequisite_steps)
                 carry_source = prerequisite_steps[-1]
                 return (
