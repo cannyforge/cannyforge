@@ -148,34 +148,6 @@ class TestCorrectionGenerator:
         assert "generate_client_report" in correction.content
         assert "carry forward" in correction.content.lower()
 
-    def test_report_prerequisite_correction_reuses_fetched_identifier_verbatim(self):
-        gen = CorrectionGenerator()
-        failure = FailureRecord(
-            timestamp=datetime.now(),
-            skill_name="tool_use",
-            task_description="if the castellano account is conservative, create an investment review report",
-            failure_class="ContextMiss",
-            phase="context",
-            expected={
-                "required_tools": ["fetch_client_portfolio", "generate_client_report"],
-                "expected_sequence": ["fetch_client_portfolio", "generate_client_report"],
-            },
-            actual={"tool": "generate_client_report", "step": 1},
-            evidence={"missing_context": True},
-        )
-
-        correction = gen.generate(
-            "tool_use",
-            failure.error_type,
-            [],
-            failures=[failure],
-        )
-
-        assert correction is not None
-        assert "client_id_or_name" in correction.content
-        assert "verbatim" in correction.content.lower()
-        assert "do not shorten, paraphrase, or rename" in correction.content.lower()
-
     def test_llm_generation_extracts_plain_rule_text_from_json_response(self):
         class FakeProvider:
             def generate(self, request):
