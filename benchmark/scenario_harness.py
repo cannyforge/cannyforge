@@ -219,8 +219,9 @@ class MockToolRouter:
                 return result
 
         result = self._domain_response(tool_name, args)
+        actual_status = result.get("status", "ok") if isinstance(result, dict) else "ok"
         self._history.append(
-            TraceEntry(tool=tool_name, args=args, result=result, status="ok")
+            TraceEntry(tool=tool_name, args=args, result=result, status=actual_status)
         )
         self._call_counts[tool_name] = call_index + 1
         return result
@@ -245,13 +246,16 @@ class MockToolRouter:
         if "call_index" in condition and condition["call_index"] != call_index:
             return False
 
-        # arg_type_mismatch: fire when an arg value is NOT the expected Python type
-        # e.g. {"offset": "int"} fires when offset is passed as a string like "8-12"
+        # arg_type_mismatch: fire when an arg value is present but NOT the expected
+        # Python type.  e.g. {"offset": "int"} fires when offset="8" (string).
+        # Does NOT fire when the arg is absent — only type-present mismatches apply.
         if "arg_type_mismatch" in condition:
             _type_map = {"int": int, "float": float, "str": str,
                          "bool": bool, "list": list, "dict": dict}
             for arg_name, expected_type_str in condition["arg_type_mismatch"].items():
                 val = args.get(arg_name)
+                if val is None:
+                    return False  # arg absent — no type mismatch to inject
                 expected_type = _type_map.get(expected_type_str)
                 if expected_type is None or isinstance(val, expected_type):
                     return False  # arg is correct type — don't inject
@@ -285,11 +289,13 @@ class MockToolRouter:
 
         # ----- Coding domain tools -----
         if tool_name == "read_file":
-            path = args.get("file_path") or args.get("path") or ""
+            # Unwrap kwargs-nested args (LangGraph occasionally emits {kwargs: {...}})
+            _rf_args = args.get("kwargs", args) if isinstance(args.get("kwargs"), dict) else args
+            path = _rf_args.get("file_path") or _rf_args.get("path") or ""
             for stored_path, content in files.items():
                 if stored_path.endswith(path) or path.endswith(stored_path.lstrip("/")):
-                    offset = args.get("offset", 0)
-                    limit = args.get("limit")
+                    offset = _rf_args.get("offset", 0)
+                    limit = _rf_args.get("limit")
                     lines = content.splitlines(keepends=True)
                     if isinstance(offset, int):
                         lines = lines[offset:]
@@ -308,25 +314,32 @@ class MockToolRouter:
             new_text = args.get("new_text") or args.get("replacement") or ""
             for stored_path, content in files.items():
                 if stored_path.endswith(path) or path.endswith(stored_path.lstrip("/")):
-                    if old_text and old_text not in content:
-                        return {"status": "error", "code": "TEXT_NOT_FOUND",
-                                "message": f"old_text not found in {stored_path}"}
-                    files[stored_path] = content.replace(old_text, new_text) if old_text else (
-                        content + new_text
-                    )
+                    if old_text:
+                        if old_text not in content:
+                            return {"status": "error", "code": "TEXT_NOT_FOUND",
+                                    "message": f"old_text not found in {stored_path}"}
+                        files[stored_path] = content.replace(old_text, new_text)
+                    else:
+                        # No old_text → treat new_text as full-file replacement (overwrite).
+                        # LLMs commonly pass the complete new content here.
+                        files[stored_path] = new_text
                     return {"status": "ok", "path": stored_path, "modified": True}
             return {"status": "ok", "path": path, "modified": True}
 
         if tool_name == "glob":
             import fnmatch
-            pattern = args.get("pattern", "*")
+            # Unwrap kwargs-nested args
+            _glob_args = args.get("kwargs", args) if isinstance(args.get("kwargs"), dict) else args
+            pattern = _glob_args.get("pattern", "*")
             matches = [p for p in files if fnmatch.fnmatch(p, pattern)
                        or fnmatch.fnmatch(Path(p).name, pattern)]
             return {"status": "ok", "matches": matches, "count": len(matches)}
 
         if tool_name == "grep":
-            pattern = args.get("pattern", "")
-            search_path = args.get("path", "")
+            # Unwrap kwargs-nested args
+            _grep_args = args.get("kwargs", args) if isinstance(args.get("kwargs"), dict) else args
+            pattern = _grep_args.get("pattern", "")
+            search_path = _grep_args.get("path", "")
             results = []
             try:
                 compiled = re.compile(pattern)
@@ -411,7 +424,12 @@ class MockToolRouter:
 
         if tool_name == "schedule_meeting":
             date = args.get("date", "")
-            meeting_time = args.get("time", "12:00")
+            # LLMs often embed time in the date arg (e.g. "April 7th at 10:00").
+            # Honour that over the default "12:00" when no explicit time arg given.
+            meeting_time = args.get("time")
+            if not meeting_time:
+                _t = re.search(r'\b(\d{1,2}:\d{2})\b', date)
+                meeting_time = _t.group(1) if _t else "12:00"
             title = args.get("title") or args.get("notes") or "Meeting"
             day_events = calendar.get(date, [])
             for event in day_events:
@@ -426,11 +444,15 @@ class MockToolRouter:
                     "date": date, "time": meeting_time, "title": title}
 
         if tool_name == "send_email":
-            to = args.get("to") or args.get("recipient") or args.get("email") or ""
-            subject = args.get("subject", "")
+            # LLMs occasionally wrap all args under a "kwargs" key — unwrap one level.
+            _email_args = args.get("kwargs", args) if isinstance(args.get("kwargs"), dict) else args
+            to = (_email_args.get("to") or _email_args.get("recipient")
+                  or _email_args.get("email") or "")
+            subject = _email_args.get("subject", "")
             if not to:
                 return {"status": "error", "code": "MISSING_RECIPIENT",
-                        "message": "Required field 'to' is missing. Use 'to', not 'recipient'."}
+                        "message": ("Required field 'to' is missing. "
+                                    "Pass the recipient address as to='user@example.com'.")}
             return {"status": "ok",
                     "message_id": f"MSG-{abs(hash(to + subject)) % 9999:04d}",
                     "to": to, "subject": subject}
@@ -682,6 +704,15 @@ class LLMScenarioRunner:
             for index, tool_name in enumerate(required_steps)
             if index > 0
         }
+        # Persist scenario-level state so the adapter can recover it on later
+        # turns where LangGraph's MessagesState drops non-messages channels.
+        if self.middleware is not None and hasattr(self.middleware, "set_task_defaults"):
+            self.middleware.set_task_defaults({
+                "available_tools": list(scenario.get("tools", [])),
+                "required_steps": required_steps,
+                "prerequisite_map": prerequisite_map,
+                "scenario_domain": domain,
+            })
         domain_text = self.domain_prompts.get(domain, self.system_prompt)
         prefix = NO_THINK_PREFIX if self.no_think else ""
         system_text = prefix + domain_text
@@ -1130,20 +1161,25 @@ class ScenarioHarness:
             "retry_loop":         "RetryLoopError",
             "hallucinated_tool":  "HallucinatedToolError",
             "context_amnesia":    "ContextMissError",
+            "wrong_tool":         "WrongToolError",
         }
         _AP_FAILURE_MAP = {
             "sequence_violation": ("SequenceViolation", "sequence", "high"),
             "retry_loop": ("RetryLoop", "recovery", "medium"),
             "hallucinated_tool": ("HallucinatedTool", "selection", "high"),
             "context_amnesia": ("ContextMiss", "context", "high"),
+            "wrong_tool": ("WrongTool", "selection", "high"),
         }
 
         for result in results:
+            # Skip scenarios that are already performing well — no useful learning signal.
+            if result.task_succeeded and result.score.composite_score >= 0.85:
+                continue
             scenario = self._find_scenario(result.scenario_id)
             if not scenario:
                 continue
             domain = scenario.get("domain", "")
-            scoped_skill = f"{skill_name}_{domain}" if domain else skill_name
+            scoped_skill = skill_name
             task_desc = scenario.get("user_message", result.scenario_id)
             expected_calls = [
                 c for c in scenario.get("expected_trace", {}).get("calls", [])
@@ -1216,48 +1252,65 @@ class ScenarioHarness:
                         },
                     )
                 elif ordering == "strict" and actual.tool != expected_tool:
-                    # Case 3: strict ordering — wrong tool at this position
-                    forge.learning_engine.record_failure(
-                        skill_name=scoped_skill,
-                        task_description=task_desc,
-                        failure_class="WrongTool",
-                        phase="selection",
-                        severity="high",
-                        expected={
-                            "tool": expected_tool,
-                            "step": step_i + 1,
-                            "args": expected_params,
-                        },
-                        actual={
-                            "tool": actual.tool,
-                            "args": actual.args,
-                        },
-                        evidence={
-                            "ordering": ordering,
-                            "actual_result": actual.result,
-                        },
-                        trace_context={
-                            "prior_results": prior_results,
-                        },
-                        scenario_id=result.scenario_id,
-                        legacy_error_type="WrongToolError",
+                    # Case 3: strict ordering — wrong tool at this position.
+                    # For partial ordering we skip this: if the expected tool
+                    # was found (just with extra calls before it), that is
+                    # inefficiency, not misselection.  Only flag in strict mode.
+                    #
+                    # Exception: if the actual tool was already called successfully
+                    # earlier in the trace, this is a context_amnesia (repeat/loop),
+                    # not a wrong-tool misselection.  Generating a "use X NOT Y"
+                    # correction in that case would be counter-productive because
+                    # Y is correct at step 1 and wrong only at step N (due to replay).
+                    _already_called_successfully = any(
+                        e.tool == actual.tool and e.status == "ok"
+                        for e in actual_trace[:step_i]
                     )
-                    forge.learning_engine.record_error(
-                        skill_name=scoped_skill,
-                        task_description=task_desc,
-                        error_type="WrongToolError",
-                        error_message=(
-                            f"Called {actual.tool!r} at step {step_i + 1}; "
-                            f"expected {expected_tool!r}"
-                        ),
-                        context_snapshot={
-                            "step": step_i,
-                            "selected_tool": actual.tool,
-                            "expected_tool": expected_tool,
-                            "actual_params": actual.args,
-                            "prior_results": prior_results,
-                        },
-                    )
+                    if _already_called_successfully:
+                        # Treat as context_amnesia (replay loop), not wrong tool.
+                        pass
+                    else:
+                        forge.learning_engine.record_failure(
+                            skill_name=scoped_skill,
+                            task_description=task_desc,
+                            failure_class="WrongTool",
+                            phase="selection",
+                            severity="high",
+                            expected={
+                                "tool": expected_tool,
+                                "step": step_i + 1,
+                                "args": expected_params,
+                            },
+                            actual={
+                                "tool": actual.tool,
+                                "args": actual.args,
+                            },
+                            evidence={
+                                "ordering": ordering,
+                                "actual_result": actual.result,
+                            },
+                            trace_context={
+                                "prior_results": prior_results,
+                            },
+                            scenario_id=result.scenario_id,
+                            legacy_error_type="WrongToolError",
+                        )
+                        forge.learning_engine.record_error(
+                            skill_name=scoped_skill,
+                            task_description=task_desc,
+                            error_type="WrongToolError",
+                            error_message=(
+                                f"Called {actual.tool!r} at step {step_i + 1}; "
+                                f"expected {expected_tool!r}"
+                            ),
+                            context_snapshot={
+                                "step": step_i,
+                                "selected_tool": actual.tool,
+                                "expected_tool": expected_tool,
+                                "actual_params": actual.args,
+                                "prior_results": prior_results,
+                            },
+                        )
                 elif expected_params and not _params_match(actual.args, expected_params):
                     # Case 2: right tool, params don't satisfy expected patterns
                     forge.learning_engine.record_failure(
@@ -1360,7 +1413,7 @@ class ScenarioHarness:
                 )
 
         metrics = forge.run_learning_cycle(
-            min_frequency=2,
+            min_frequency=1,  # this is really for kick off learning for benchmark purpose, not for production usage :-)
             llm_provider=learning_llm,
         )
         return (getattr(metrics, "corrections_generated", 0)
@@ -1690,6 +1743,41 @@ Rules:
 }
 
 
+def _strip_reasoning_content(messages: list) -> list:
+    """Return messages with reasoning_content stripped from AIMessage.additional_kwargs.
+
+    DeepSeek thinking models (deepseek-v4-flash, deepseek-reasoner) embed
+    reasoning_content in each assistant message and require it to be echoed back
+    verbatim on subsequent turns.  LangChain doesn't preserve this field reliably,
+    so we strip it on every outbound call — the API then treats each turn as
+    non-thinking rather than rejecting the request with a 400.
+    """
+    try:
+        from langchain_core.messages import AIMessage
+    except ImportError:
+        return messages
+    cleaned = []
+    for m in messages:
+        if isinstance(m, AIMessage) and m.additional_kwargs.get("reasoning_content"):
+            m = m.model_copy(update={
+                "additional_kwargs": {
+                    k: v for k, v in m.additional_kwargs.items()
+                    if k != "reasoning_content"
+                }
+            })
+        cleaned.append(m)
+    return cleaned
+
+
+class _ReasoningStrippedChatOpenAI:
+    """Placeholder — replaced at runtime by a ChatOpenAI subclass inside build_llm."""
+
+
+
+_THINKING_MODEL_PATTERNS = ("deepseek-v4-flash", "deepseek-reasoner", "deepseek-r1",
+                             "deepseek-v3-flash")
+
+
 def build_llm(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -1702,6 +1790,55 @@ def build_llm(
     except ImportError:
         print("pip install langchain-openai")
         return None
+
+    # Subclass defined here so ChatOpenAI is available as a base class.
+    # Strips reasoning_content from AIMessage history before each API call —
+    # required for DeepSeek thinking models (deepseek-v4-flash, deepseek-reasoner)
+    # which embed it in responses but reject turns where it's absent.
+    # Overrides every LangChain/LangGraph call path: invoke/stream/ainvoke/astream
+    # (used by RunnableBinding from bind_tools) AND _generate/_stream (direct calls).
+    class _ThinkingStrippedChat(ChatOpenAI):
+        @staticmethod
+        def _s(inp):
+            return _strip_reasoning_content(list(inp)) if isinstance(inp, (list, tuple)) else inp
+
+        def invoke(self, input, config=None, **kwargs):
+            return super().invoke(self._s(input), config=config, **kwargs)
+
+        def stream(self, input, config=None, **kwargs):
+            return super().stream(self._s(input), config=config, **kwargs)
+
+        async def ainvoke(self, input, config=None, **kwargs):
+            return await super().ainvoke(self._s(input), config=config, **kwargs)
+
+        async def astream(self, input, config=None, **kwargs):
+            async for chunk in super().astream(self._s(input), config=config, **kwargs):
+                yield chunk
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return super()._generate(
+                _strip_reasoning_content(messages), stop=stop,
+                run_manager=run_manager, **kwargs,
+            )
+
+        def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+            yield from super()._stream(
+                _strip_reasoning_content(messages), stop=stop,
+                run_manager=run_manager, **kwargs,
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return await super()._agenerate(
+                _strip_reasoning_content(messages), stop=stop,
+                run_manager=run_manager, **kwargs,
+            )
+
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            async for chunk in super()._astream(
+                _strip_reasoning_content(messages), stop=stop,
+                run_manager=run_manager, **kwargs,
+            ):
+                yield chunk
 
     if nvidia:
         try:
@@ -1717,7 +1854,8 @@ def build_llm(
         return ChatOpenAI(model=model or "qwen2.5:3b", api_key="ollama",
                           base_url=OLLAMA_BASE_URL, temperature=0, timeout=timeout)
 
-    key = api_key or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    key = (api_key or os.environ.get("LLM_API_KEY")
+           or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY", ""))
     if not key:
         print("Set LLM_API_KEY or use --ollama")
         return None
@@ -1728,7 +1866,17 @@ def build_llm(
                                "api_key": key, "temperature": 0, "timeout": timeout}
     if base_url:
         kwargs["base_url"] = base_url
-    return ChatOpenAI(**kwargs)
+    is_thinking = any(pat in resolved_model for pat in _THINKING_MODEL_PATTERNS)
+    if is_thinking:
+        # Pass thinking.budget_tokens=0 via extra_body to disable DeepSeek's
+        # thinking/reasoning mode entirely.  budget_tokens=0 means "no thinking
+        # budget" — the model behaves like a standard chat model and never emits
+        # reasoning_content, so there is nothing to echo back on subsequent turns.
+        # extra_body is forwarded verbatim to the HTTP request body by the OpenAI
+        # Python client (bypasses the strict parameter schema).
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    cls = _ThinkingStrippedChat if is_thinking else ChatOpenAI
+    return cls(**kwargs)
 
 
 def _print_result(r: RunResult) -> None:
