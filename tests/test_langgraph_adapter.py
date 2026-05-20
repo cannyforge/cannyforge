@@ -115,7 +115,10 @@ class TestCannyForgeMiddleware:
 
         ctx = middleware._state_to_context(state)
         assert ctx["context"]["attempted_tool"] == "execute_trade"
-        assert ctx["context"]["tool_match_confidence"] == 0.3
+        # execute_trade is in available_tools but not required_steps:
+        # available-but-unexpected → 0.65 (above WrongTool threshold so rule
+        # does not fire for legitimate exploration of available tools).
+        assert ctx["context"]["tool_match_confidence"] == 0.65
 
     def test_state_to_context_message_object(self, middleware):
         class FakeMsg:

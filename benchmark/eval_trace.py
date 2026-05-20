@@ -573,7 +573,19 @@ class TraceEvaluator:
             return max(0.0, 1.0 - (actual_calls - max_calls) / max_calls)
 
         # Efficiency = ideal / actual (1.0 when minimal)
-        return min(1.0, min_calls / actual_calls)
+        raw = min(1.0, min_calls / actual_calls)
+        # Don't penalise efficiency below 0.5 when the task actually succeeded —
+        # recovery calls that lead to success should not score lower than a fast
+        # failure.  This prevents the formula from rewarding failing-fast over
+        # succeeding-slowly (coding_003 regression).
+        task_succeeded = any(
+            e.get("task_succeeded") or e.get("outcome") == "success"
+            for e in trace
+            if isinstance(e, dict)
+        )
+        if task_succeeded and raw < 0.5:
+            raw = 0.5
+        return raw
 
 
 # ---------------------------------------------------------------------------

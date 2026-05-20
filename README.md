@@ -82,8 +82,20 @@ Tasks fixed:
 
 This scenario uses tasks specifically designed to have learnable, recurring patterns — ideal conditions for correction-based improvement. Results vary on tasks with low repetition or novel failure modes.
 
-## Install
+## Benchmark
 
+On the FSI-80 harness (15 scenarios × 4 conditions — coding, data, MCP orchestration), the recommended deployment pattern achieves:
+
+| Condition | Composite | Recovery | Retry-Loop |
+|---|---|---|---|
+| baseline | 0.910 | 0.867 | 0.864 |
+| static rules only | 0.894 | 0.800 | 0.856 |
+| CannyForge only | 0.900 | 0.867 | 0.864 |
+| **static + CannyForge** | **0.919** | **0.933** | **0.906** |
+
+**static+cf** is the top condition: +0.9 pp over baseline, with the strongest gains on retry-loop recovery (+4.2 pp) and overall recovery behavior (+6.6 pp). Run: `python benchmark/scenario_harness.py --model deepseek-v4-flash --domains coding data mcp --learning-mode paired`. See [docs/ABLATION_STUDY_20260510.md](docs/ABLATION_STUDY_20260510.md) for the full per-scenario breakdown.
+
+## Install
 ```bash
 pip install cannyforge           # from PyPI
 ```

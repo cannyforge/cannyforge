@@ -450,9 +450,12 @@ class MockToolRouter:
                   or _email_args.get("email") or "")
             subject = _email_args.get("subject", "")
             if not to:
+                contacts = self._setup.get("contacts", {})
+                known = [v["email"] for v in contacts.values() if v.get("email")]
+                hint = f" Known contacts: {', '.join(known)}." if known else ""
                 return {"status": "error", "code": "MISSING_RECIPIENT",
                         "message": ("Required field 'to' is missing. "
-                                    "Pass the recipient address as to='user@example.com'.")}
+                                    f"Pass the recipient address as to='user@example.com'.{hint}")}
             return {"status": "ok",
                     "message_id": f"MSG-{abs(hash(to + subject)) % 9999:04d}",
                     "to": to, "subject": subject}
