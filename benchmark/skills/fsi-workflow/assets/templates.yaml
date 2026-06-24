@@ -1,0 +1,236 @@
+# FSI Workflow intent → tool mapping
+# Each template maps natural-language intent signals to the correct tool.
+# Confusion pair IDs (1-4) mark structurally similar tools; the
+# disambiguation_note explains what breaks the tie.
+
+# ── Pair 1: Client portfolio vs Market data ───────────────────────────────────
+
+fetch_client_portfolio:
+  confusion_pair: 1
+  match:
+    - portfolio
+    - holdings
+    - positions
+    - what does the client hold
+    - client account
+    - client securities
+    - client allocation
+    - trust account
+    - account balance
+    - cost basis
+    - unrealized
+    - lot size
+    - client id
+  tool: fetch_client_portfolio
+  params:
+    client_id:   { required: true,  type: str }
+    account_type:{ required: false, type: str, default: "all" }
+    as_of_date:  { required: false, type: str }
+  disambiguation_note: >-
+    Requires a specific client_id. If the request names a client or
+    account, always fetch_client_portfolio — even if it mentions prices.
+
+get_market_data:
+  confusion_pair: 1
+  match:
+    - current price
+    - market price
+    - quote
+    - bid
+    - ask
+    - last trade
+    - intraday
+    - market feed
+    - live price
+    - ticker
+    - exchange price
+    - what is the price of
+    - how much is trading at
+  tool: get_market_data
+  params:
+    symbol:    { required: true,  type: str }
+    data_type: { required: false, type: str, default: "quote" }
+    interval:  { required: false, type: str, default: "1d" }
+  disambiguation_note: >-
+    No client_id — the request is about a security in the MARKET, not
+    what a specific client owns. Use ticker/symbol as the key signal.
+
+# ── Pair 2: Compliance check vs Risk metrics ──────────────────────────────────
+
+run_compliance_check:
+  confusion_pair: 2
+  match:
+    - compliance
+    - regulatory check
+    - rules violation
+    - restricted list
+    - watchlist
+    - suitability
+    - kyc
+    - know your customer
+    - aml
+    - anti-money laundering
+    - pre-trade compliance
+    - post-trade compliance
+    - permitted investment
+    - investment policy statement
+    - ips violation
+    - concentration limit
+    - sector limit
+  tool: run_compliance_check
+  params:
+    client_id:  { required: true,  type: str }
+    trade_id:   { required: false, type: str }
+    check_type: { required: false, type: str, default: "full" }
+  disambiguation_note: >-
+    The distinguishing signal is RULES: restricted lists, suitability,
+    KYC/AML, IPS. Compliance says pass/fail against a ruleset.
+    Risk metrics are numerical (VaR, exposure) — that's get_risk_metrics.
+
+get_risk_metrics:
+  confusion_pair: 2
+  match:
+    - risk
+    - var
+    - value at risk
+    - exposure
+    - drawdown
+    - stress test
+    - portfolio risk
+    - concentration risk
+    - beta
+    - volatility
+    - sharpe
+    - max drawdown
+    - risk report
+    - quantitative risk
+    - market risk
+    - counterparty risk
+  tool: get_risk_metrics
+  params:
+    portfolio_id: { required: true,  type: str }
+    metric:       { required: false, type: str, default: "all" }
+    horizon_days: { required: false, type: int, default: 1 }
+  disambiguation_note: >-
+    Produces a NUMBER (VaR, exposure, beta). No mention of rules,
+    regulations, or pass/fail. If it's a quantitative risk measure,
+    use get_risk_metrics — not run_compliance_check.
+
+# ── Pair 3: Execute trade vs Internal alert ───────────────────────────────────
+
+execute_trade_order:
+  confusion_pair: 3
+  match:
+    - execute trade
+    - place order
+    - buy
+    - sell
+    - trade
+    - order
+    - fill
+    - submit to oms
+    - market order
+    - limit order
+    - block trade
+    - rebalance
+    - liquidate
+    - enter position
+    - exit position
+  tool: execute_trade_order
+  params:
+    symbol:     { required: true,  type: str }
+    side:       { required: true,  type: str }
+    quantity:   { required: true,  type: float }
+    order_type: { required: false, type: str, default: "market" }
+    client_id:  { required: false, type: str }
+  disambiguation_note: >-
+    Results in a MARKET TRANSACTION. A buy or sell touches the OMS and
+    the exchange. If no market transaction is intended (just notifying
+    someone), use send_internal_alert instead.
+
+send_internal_alert:
+  confusion_pair: 3
+  match:
+    - alert
+    - notify operations
+    - notify ops
+    - flag
+    - escalate
+    - internal notification
+    - ops team
+    - desk alert
+    - alert the desk
+    - risk desk
+    - compliance team
+    - send internal message
+    - mark for review
+    - raise a flag
+    - warn the team
+  tool: send_internal_alert
+  params:
+    recipient:  { required: true,  type: str }
+    message:    { required: true,  type: str }
+    priority:   { required: false, type: str, default: "normal" }
+    channel:    { required: false, type: str, default: "ops" }
+  disambiguation_note: >-
+    INTERNAL ONLY — no market transaction. Goes to a person or team
+    inside the firm. If the task involves buying/selling anything,
+    use execute_trade_order instead.
+
+# ── Pair 4: Client report vs Regulatory filing ────────────────────────────────
+
+generate_client_report:
+  confusion_pair: 4
+  match:
+    - client report
+    - performance report
+    - account statement
+    - quarterly statement
+    - monthly statement
+    - send to client
+    - client-facing document
+    - portfolio statement
+    - generate report for client
+    - client communication
+    - investment summary for
+    - review package
+  tool: generate_client_report
+  params:
+    client_id:   { required: true,  type: str }
+    report_type: { required: false, type: str, default: "performance" }
+    period:      { required: false, type: str }
+    format:      { required: false, type: str, default: "pdf" }
+  disambiguation_note: >-
+    Recipient is the CLIENT. Statements, performance reports, review
+    packages all go to the investor. If it goes to a regulator
+    (SEC, FINRA), use file_regulatory_report.
+
+file_regulatory_report:
+  confusion_pair: 4
+  match:
+    - regulatory filing
+    - sec filing
+    - finra filing
+    - file with sec
+    - file with finra
+    - form adv
+    - 13f
+    - 13d
+    - 13g
+    - form pf
+    - sro filing
+    - regulatory submission
+    - submit to regulator
+    - compliance filing
+    - annual filing
+    - quarterly filing with
+  tool: file_regulatory_report
+  params:
+    form_type:    { required: true,  type: str }
+    period:       { required: true,  type: str }
+    filing_entity:{ required: false, type: str }
+    regulator:    { required: false, type: str, default: "SEC" }
+  disambiguation_note: >-
+    Recipient is a REGULATOR (SEC, FINRA, etc.). SEC filings, FINRA
+    submissions, Form ADV, 13F/13D/13G all go here. If the document
+    goes to the client, use generate_client_report.

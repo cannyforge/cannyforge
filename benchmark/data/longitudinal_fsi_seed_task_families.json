@@ -1,0 +1,228 @@
+[
+  {
+    "task_family": "portfolio_prereq_then_action",
+    "variant_id": "fsi_c01",
+    "domain": "fsi",
+    "difficulty": "hard",
+    "window_role": "mixed",
+    "transfer_cluster": "compliance_before_trade",
+    "failure_family": "missing_prerequisite",
+    "user_request": "Review the Alderman Trust, confirm the proposed rebalance is mandate-compliant, then place the rebalance trade",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "fetch_client_portfolio",
+        "run_compliance_check",
+        "execute_trade"
+      ]
+    },
+    "expected_sequence": [
+      "fetch_client_portfolio",
+      "run_compliance_check",
+      "execute_trade"
+    ],
+    "expected_arg_contains": {
+      "execute_trade": {
+        "account_hint": "Alderman Trust"
+      }
+    },
+    "distractor_tools": [
+      "execute_trade"
+    ],
+    "environment_template": {
+      "account_name": "Alderman Trust",
+      "workflow": "rebalance"
+    },
+    "scoring_contract": {
+      "sequence_required": true,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 4
+    }
+  },
+  {
+    "task_family": "portfolio_prereq_then_action",
+    "variant_id": "fsi_c05",
+    "domain": "fsi",
+    "difficulty": "hard",
+    "window_role": "mixed",
+    "transfer_cluster": "compliance_before_trade",
+    "failure_family": "missing_prerequisite",
+    "user_request": "Check whether adding NVDA to PVT-2209 is allowed and if so execute the purchase",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "fetch_client_portfolio",
+        "run_compliance_check",
+        "execute_trade"
+      ]
+    },
+    "expected_sequence": [
+      "fetch_client_portfolio",
+      "run_compliance_check",
+      "execute_trade"
+    ],
+    "expected_arg_contains": {
+      "run_compliance_check": {
+        "symbol": "NVDA"
+      }
+    },
+    "distractor_tools": [
+      "run_compliance_check",
+      "execute_trade"
+    ],
+    "environment_template": {
+      "account_id": "PVT-2209",
+      "symbol": "NVDA"
+    },
+    "scoring_contract": {
+      "sequence_required": true,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 4
+    }
+  },
+  {
+    "task_family": "regulatory_report_format",
+    "variant_id": "fsi_c09",
+    "domain": "fsi",
+    "difficulty": "medium",
+    "window_role": "mixed",
+    "transfer_cluster": "regulatory_report_formatting",
+    "failure_family": "arg_format",
+    "user_request": "File a SAR for the Castellano account from 2025-01-01 to 2025-03-31",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "file_regulatory_report"
+      ]
+    },
+    "expected_arg_contains": {
+      "file_regulatory_report": {
+        "report_type": "^sar$",
+        "start_date": "2025-01-01",
+        "end_date": "2025-03-31"
+      }
+    },
+    "distractor_tools": [
+      "send_internal_alert"
+    ],
+    "environment_template": {
+      "account_name": "Castellano account",
+      "report_type": "sar"
+    },
+    "scoring_contract": {
+      "sequence_required": false,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 2
+    }
+  },
+  {
+    "task_family": "risk_metric_format",
+    "variant_id": "fsi_c11",
+    "domain": "fsi",
+    "difficulty": "medium",
+    "window_role": "mixed",
+    "transfer_cluster": "metric_type_formatting",
+    "failure_family": "arg_format",
+    "user_request": "Calculate the beta for the Alderman Trust portfolio",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "calculate_risk_metrics"
+      ]
+    },
+    "expected_arg_contains": {
+      "calculate_risk_metrics": {
+        "metric_type": "^beta$"
+      }
+    },
+    "distractor_tools": [
+      "query_market_data"
+    ],
+    "environment_template": {
+      "account_name": "Alderman Trust",
+      "metric_type": "beta"
+    },
+    "scoring_contract": {
+      "sequence_required": false,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 2
+    }
+  },
+  {
+    "task_family": "conditional_portfolio_then_metric",
+    "variant_id": "fsi_c15",
+    "domain": "fsi",
+    "difficulty": "hard",
+    "window_role": "mixed",
+    "transfer_cluster": "context_gate_before_metric",
+    "failure_family": "context_amnesia",
+    "user_request": "If the Alderman Trust has AUM above one million dollars, calculate its Sharpe ratio",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "fetch_client_portfolio",
+        "calculate_risk_metrics"
+      ]
+    },
+    "expected_sequence": [
+      "fetch_client_portfolio",
+      "calculate_risk_metrics"
+    ],
+    "expected_arg_contains": {
+      "calculate_risk_metrics": {
+        "metric_type": "sharpe"
+      }
+    },
+    "distractor_tools": [
+      "calculate_risk_metrics"
+    ],
+    "environment_template": {
+      "account_name": "Alderman Trust",
+      "gating_field": "aum",
+      "gating_threshold": 1000000
+    },
+    "scoring_contract": {
+      "sequence_required": true,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 3
+    }
+  },
+  {
+    "task_family": "conditional_portfolio_then_report",
+    "variant_id": "fsi_c18",
+    "domain": "fsi",
+    "difficulty": "hard",
+    "window_role": "mixed",
+    "transfer_cluster": "context_gate_before_report",
+    "failure_family": "context_amnesia",
+    "user_request": "If the Castellano account is conservative, create an investment review report for the next meeting",
+    "expected_outcome": {
+      "success_type": "completed_workflow",
+      "required_tools": [
+        "fetch_client_portfolio",
+        "generate_client_report"
+      ]
+    },
+    "expected_sequence": [
+      "fetch_client_portfolio",
+      "generate_client_report"
+    ],
+    "expected_arg_contains": {
+      "generate_client_report": {
+        "report_type": "investment_review"
+      }
+    },
+    "distractor_tools": [
+      "generate_client_report"
+    ],
+    "environment_template": {
+      "account_name": "Castellano account",
+      "required_risk_profile": "conservative"
+    },
+    "scoring_contract": {
+      "sequence_required": true,
+      "recovery_allowed": true,
+      "max_reasonable_tool_calls": 3
+    }
+  }
+]

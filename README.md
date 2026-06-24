@@ -2,13 +2,13 @@
 
 **Reliability memory for tool-using LLM agents.**
 
-CannyForge watches your agent make mistakes, learns corrections, and injects them as SystemMessages before each LLM call. Your agent gets better over time — no retraining required.
+CannyForge watches your agent make mistakes, learns corrections, and injects them as SystemMessages before each LLM call — no retraining required.
 
 ```
 Agent makes errors → CannyForge learns corrections → Agent stops repeating them
 ```
 
-![CannyForge demo: 80% → 100% on real LLM](docs/demo.gif)
+![CannyForge demo: baseline → improved tool accuracy on real LLM](docs/demo.gif)
 
 ## Quick Start (LangGraph)
 
@@ -38,14 +38,14 @@ The benchmark branch is focused on three adoption-oriented improvements:
 This is aimed at modern agent stacks, including LangGraph, LangChain-style tool agents,
 CrewAI-style orchestration, MCP-connected assistants, and personal assistant workflows.
 
-See [docs/v0.3-public.md](/home/xiwei/pg/cannyforge/docs/v0.3-public.md) for the public summary.
+See [docs/v0.3-public.md](docs/v0.3-public.md) for the public summary.
 
 ## How It Works
 
 1. **Record errors** — `after_model` detects tool failures and records them
 2. **Learn corrections** — `run_learning_cycle()` clusters errors and generates specific correction text (template or LLM-generated)
 3. **Inject corrections** — `before_model` prepends a SystemMessage with all active corrections before each LLM call
-4. **Track effectiveness** — corrections that prevent recurrence are kept; ineffective ones can be regenerated
+4. **Track effectiveness** — corrections are associated with observed failure clusters; pruning based on recurrence is supported via the rule lifecycle
 
 The correction is specific and actionable:
 ```
@@ -54,7 +54,7 @@ The correction is specific and actionable:
   Example: "Create a summary of Q4 sales performance"
 ```
 
-## Demo: 60% → 100% on Real LLM
+## Demo
 
 ```bash
 pip install langgraph langchain-openai
@@ -64,10 +64,10 @@ python scenarios/demo_cannyforge.py
 
 This runs 15 ambiguous tool-selection tasks twice:
 - **Phase 1**: baseline without corrections — records errors
-- **Learning**: generates corrections from observed errors
-- **Phase 2**: same tasks with correction injection — accuracy improves
+- **Learning**: generates corrections from failure clusters
+- **Phase 2**: same tasks with correction injection — repeat errors are reduced
 
-Real output with DeepSeek:
+Sample output with DeepSeek on this narrow scenario:
 ```
 Phase 1 accuracy: 9/15 (60%)
 Phase 2 accuracy: 15/15 (100%)
@@ -80,10 +80,22 @@ Tasks fixed:
   - Generate a monthly uptime report -> generate_report
 ```
 
-No simulated errors. No hand-crafted rules. Real LLM decisions, real corrections from the pipeline.
+This scenario uses tasks specifically designed to have learnable, recurring patterns — ideal conditions for correction-based improvement. Results vary on tasks with low repetition or novel failure modes.
+
+## Benchmark
+
+On the FSI-80 harness (15 scenarios × 4 conditions — coding, data, MCP orchestration), the recommended deployment pattern achieves:
+
+| Condition | Composite | Recovery | Retry-Loop |
+|---|---|---|---|
+| baseline | 0.910 | 0.867 | 0.864 |
+| static rules only | 0.894 | 0.800 | 0.856 |
+| CannyForge only | 0.900 | 0.867 | 0.864 |
+| **static + CannyForge** | **0.919** | **0.933** | **0.906** |
+
+**static+cf** is the top condition: +0.9 pp over baseline, with the strongest gains on retry-loop recovery (+4.2 pp) and overall recovery behavior (+6.6 pp). Run: `python benchmark/scenario_harness.py --model deepseek-v4-flash --domains coding data mcp --learning-mode paired`. See [docs/ABLATION_STUDY_20260510.md](docs/ABLATION_STUDY_20260510.md) for the full per-scenario breakdown.
 
 ## Install
-
 ```bash
 pip install cannyforge           # from PyPI
 ```
@@ -107,17 +119,18 @@ Older demo scripts are in `scenarios/archive/` for reference.
 
 ## Framework Coverage
 
-| Surface | Current repo path |
-|--------|-------------------|
-| LangGraph middleware | `cannyforge/adapters/langgraph.py` |
-| LangChain adapter | `cannyforge/adapters/langchain.py` |
-| CrewAI adapter | `cannyforge/adapters/crewai.py` |
-| MCP server | `cannyforge/mcp_server.py` |
-| Bundled assistant skills | `cannyforge/bundled_skills/` |
+| Adapter | Correction loop | What it does | Path |
+|--------|:-:|---|---|
+| **LangGraph** | ✓ | Full middleware: injects corrections before model calls, records errors after | `cannyforge/adapters/langgraph.py` |
+| LangChain | – | Skill wrapper: exposes a CF skill as a `BaseTool` | `cannyforge/adapters/langchain.py` |
+| CrewAI | – | Skill wrapper: exposes a CF skill as a CrewAI tool | `cannyforge/adapters/crewai.py` |
+| MCP | – | Skill execution via MCP server protocol | `cannyforge/mcp_server.py` |
+| OpenAI Agents SDK | planned | — | — |
+| Anthropic SDK | planned | — | — |
+
+The correction-learning loop (inject → record → cluster → generalize → re-inject) is currently only active through the LangGraph middleware. The LangChain and CrewAI adapters let you run CF skills inside those frameworks; they don’t feed errors back into the learning pipeline.
 
 CannyForge is designed to sit on top of existing agent frameworks rather than replace them.
-The public focus for v0.3 is improved tool routing, argument quality, multi-step execution, and
-reusable skills.
 
 ## Core Architecture
 

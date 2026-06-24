@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cannyforge.dev/schema/longitudinal_task_family.schema.json",
+  "title": "CannyForge Longitudinal Task Family",
+  "description": "Reusable task-family definition for the longitudinal benchmark harness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_family",
+    "variant_id",
+    "domain",
+    "difficulty",
+    "window_role",
+    "transfer_cluster",
+    "failure_family",
+    "user_request",
+    "expected_outcome",
+    "scoring_contract"
+  ],
+  "properties": {
+    "task_family": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Primary reusable pattern identifier used for transfer and reporting."
+    },
+    "variant_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identity for one task phrasing or state variant inside a task family."
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Benchmark domain, such as fsi, coding, data, or mcp."
+    },
+    "difficulty": {
+      "type": "string",
+      "enum": [
+        "easy",
+        "medium",
+        "hard"
+      ],
+      "description": "Difficulty bucket inherited from prior benchmark design."
+    },
+    "window_role": {
+      "type": "string",
+      "enum": [
+        "warmup",
+        "learn",
+        "evaluate",
+        "mixed"
+      ],
+      "description": "Dataset role hint used when constructing streams."
+    },
+    "transfer_cluster": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Cluster label that replaces FSI80 confusion_pair semantics."
+    },
+    "failure_family": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Canonical failure family this task is intended to exercise."
+    },
+    "user_request": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Canonical user request text for the task variant."
+    },
+    "expected_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success_type"
+      ],
+      "properties": {
+        "success_type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Primary completion contract, such as completed_workflow or final_answer."
+        },
+        "required_tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "description": "Tools that must appear for the task to count as complete."
+        },
+        "final_artifact": {
+          "type": "string",
+          "description": "Optional expected artifact type or final answer shape."
+        }
+      },
+      "description": "Completion target for the task family."
+    },
+    "expected_sequence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "description": "Ordered tool dependency chain when sequence matters."
+    },
+    "expected_arg_contains": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": [
+            "string",
+            "number",
+            "integer",
+            "boolean"
+          ]
+        }
+      },
+      "description": "Expected argument fragments keyed by tool name."
+    },
+    "distractor_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "description": "Tools that are plausible but wrong for this task family."
+    },
+    "environment_template": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Template state used to render concrete task episodes."
+    },
+    "scoring_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence_required",
+        "recovery_allowed",
+        "max_reasonable_tool_calls"
+      ],
+      "properties": {
+        "sequence_required": {
+          "type": "boolean"
+        },
+        "recovery_allowed": {
+          "type": "boolean"
+        },
+        "max_reasonable_tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Explicit evaluator contract for the task family."
+    }
+  }
+}
