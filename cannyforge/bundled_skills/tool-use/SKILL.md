@@ -12,6 +12,7 @@ metadata:
   category: tool-use
   output_type: tool_call
   triggers:
+    - tool
     # Math operations
     - calculate
     - compute
