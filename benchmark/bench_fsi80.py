@@ -55,14 +55,51 @@ load_dotenv()
 from cannyforge import CannyForge
 from cannyforge.adapters.langgraph import CannyForgeMiddleware
 
+_LANGGRAPH_STACK_AVAILABLE = True
+_LANGGRAPH_IMPORT_ERROR: Optional[Exception] = None
+
 try:
     from langgraph.prebuilt import create_react_agent
     from langchain_openai import ChatOpenAI
     from langchain_core.tools import tool
     from langchain_core.messages import SystemMessage
-except ImportError:
-    print("Install required packages: pip install langgraph langchain-openai")
-    raise SystemExit(1)
+except ImportError as exc:
+    # Keep benchmark script behavior explicit at runtime while allowing tests to import.
+    _LANGGRAPH_STACK_AVAILABLE = False
+    _LANGGRAPH_IMPORT_ERROR = exc
+
+    class SystemMessage:  # type: ignore[no-redef]
+        def __init__(self, content: str):
+            self.content = content
+            self.type = "system"
+
+    class ChatOpenAI:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ModuleNotFoundError(
+                "Install required packages: pip install langgraph langchain-openai"
+            ) from _LANGGRAPH_IMPORT_ERROR
+
+    def create_react_agent(*args, **kwargs):  # type: ignore[no-redef]
+        raise ModuleNotFoundError(
+            "Install required packages: pip install langgraph langchain-openai"
+        ) from _LANGGRAPH_IMPORT_ERROR
+
+    def tool(func):  # type: ignore[no-redef]
+        class _LocalTool:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.__name__ = wrapped.__name__
+                self.__doc__ = wrapped.__doc__
+
+            def __call__(self, *args, **kwargs):
+                return self._wrapped(*args, **kwargs)
+
+            def invoke(self, payload):
+                if not isinstance(payload, dict):
+                    raise TypeError("Tool invoke expects a dict payload")
+                return self._wrapped(**payload)
+
+        return _LocalTool(func)
 
 try:
     from langchain_nvidia_ai_endpoints import ChatNVIDIA
@@ -1101,6 +1138,10 @@ def print_stratified_table(all_results: List[TaskResult], tasks_meta: Dict[str, 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    if not _LANGGRAPH_STACK_AVAILABLE:
+        print("Install required packages: pip install langgraph langchain-openai")
+        raise SystemExit(1)
+
     parser = argparse.ArgumentParser(description="FSI-Bench-80 ablation runner")
     parser.add_argument("--sets", choices=["A", "B", "AB"], default="AB",
                         help="Which task sets to run (default: AB)")
