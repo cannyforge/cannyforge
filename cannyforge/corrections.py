@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -86,7 +87,9 @@ class Correction:
         if not self.trigger_keywords:
             return True
         task_tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", (task_description or "").lower()))
-        return any(keyword in task_tokens for keyword in self.trigger_keywords)
+        threshold = max(1, math.ceil(len(self.trigger_keywords) / 2))
+        matches = sum(1 for keyword in self.trigger_keywords if keyword in task_tokens)
+        return matches >= threshold
 
     def applies_to(self, task_description: str) -> bool:
         return self.applies_to_context({}, task_description)
@@ -164,6 +167,18 @@ class CorrectionGenerator:
     def _derive_trigger_keywords(self,
                                  errors: List[Any],
                                  failures: List[Any]) -> List[str]:
+        # For arg_format failures, trigger on tool-name tokens rather than task
+        # description tokens. Task surface words are too task-specific and cause
+        # the correction to fire on semantically unrelated tasks (coding_002 root cause).
+        if failures:
+            family = getattr(failures[0], "intervention_family", "") or ""
+            if not family:
+                failure_class = getattr(failures[0], "failure_class", "")
+                if failure_class:
+                    family = get_failure_definition(str(failure_class)).intervention_family
+            if family == "arg_format":
+                return self._derive_trigger_keywords_arg_format(failures)
+
         tasks = [getattr(err, "task_description", "") for err in errors if getattr(err, "task_description", "")]
         tasks.extend(
             getattr(failure, "task_description", "")
@@ -171,6 +186,27 @@ class CorrectionGenerator:
             if getattr(failure, "task_description", "")
         )
         return self._common_keywords(tasks, max_count=5)
+
+    def _derive_trigger_keywords_arg_format(self, failures: List[Any]) -> List[str]:
+        """Derive trigger keywords from the failing tool name, not the task text.
+
+        Using task-text tokens produces surface keywords that match unrelated tasks
+        (e.g., the task 'Read lines 8-12 of server.py' yields keywords like 'endpoint'
+        and 'users' that also match entirely different scenarios). Tool-name tokens
+        ('read', 'file' from 'read_file') are scoped to the actual tool that failed.
+        """
+        seen: set = set()
+        keywords: List[str] = []
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            actual = getattr(failure, "actual", {}) or {}
+            tool = expected.get("tool") or actual.get("tool") or ""
+            if tool:
+                for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", tool.lower()):
+                    if token not in seen:
+                        keywords.append(token)
+                        seen.add(token)
+        return keywords[:4]
 
     def _derive_trigger_task_families(self,
                                       errors: List[Any],
@@ -288,6 +324,54 @@ class CorrectionGenerator:
                 return [str(tool_name) for tool_name in sequence if tool_name]
         return []
 
+    def _arg_format_template_from_failures(self, failures: List[Any]) -> Optional[str]:
+        """Build a specific arg_format correction from FailureRecord expected/actual data.
+
+        Generic template text ("validate parameters against the schema") is not actionable
+        because it names neither the tool nor the argument that failed. When FailureRecord
+        carries structured expected/actual dicts we can generate a concrete rule like
+        "when calling read_file, pass offset as an integer, not a string."
+        """
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            actual = getattr(failure, "actual", {}) or {}
+            tool = expected.get("tool") or actual.get("tool") or ""
+            if not tool:
+                continue
+
+            expected_args = expected.get("args", {}) or {}
+            actual_args = actual.get("args", {}) or {}
+
+            # Find args that are in expected but missing from actual, or carry a
+            # regex-style constraint (starts with ^) indicating a type requirement.
+            failing_args: List[Tuple[str, str]] = []
+            for arg_name, expected_val in expected_args.items():
+                actual_val = actual_args.get(arg_name)
+                if actual_val is None or (
+                    isinstance(expected_val, str) and expected_val.startswith("^")
+                ):
+                    failing_args.append((arg_name, str(expected_val)))
+
+            if not failing_args:
+                continue
+
+            arg_name, expected_pattern = failing_args[0]
+
+            # Derive a human-readable type hint from the regex pattern.
+            if "0-9" in expected_pattern:
+                type_desc = f"an integer (e.g. `{arg_name}=7`)"
+            elif expected_pattern.startswith("^") and expected_pattern.endswith("$"):
+                type_desc = f"a value matching `{expected_pattern}`"
+            else:
+                type_desc = "the correct type per the tool schema"
+
+            return (
+                f"When calling `{tool}`, pass `{arg_name}` as {type_desc}. "
+                f"Do not omit `{arg_name}` or pass it as a string."
+            )
+
+        return None
+
     def _tokenize(self, text: str) -> List[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", text.lower())
         return [t for t in tokens if len(t) > 2 and t not in self._STOPWORDS]
@@ -351,6 +435,9 @@ class CorrectionGenerator:
             )
 
         if family == "arg_format":
+            specific = self._arg_format_template_from_failures(failure_list)
+            if specific:
+                return specific
             return (
                 "Validate required parameters, types, and output shape against the tool schema before calling the tool."
             )
@@ -425,10 +512,19 @@ class CorrectionGenerator:
                     "evidence": getattr(failure, "evidence", {}),
                 })
 
+            correction_type = self._resolve_correction_type(error_type, failures)
+            type_specific_instruction = ""
+            if correction_type == "arg_format":
+                type_specific_instruction = (
+                    " Name the specific tool function and the argument that failed. "
+                    "Include the correct argument type (e.g. integer, not string). "
+                    "Do not write a generic schema-validation rule."
+                )
+
             prompt = (
                 "Given these repeated execution mistakes, write one concise correction rule "
                 "that prevents similar future failures on unseen tasks. Keep it imperative, "
-                "specific, and under 80 words. Return plain text only.\n\n"
+                f"specific, and under 80 words.{type_specific_instruction} Return plain text only.\n\n"
                 f"Skill: {skill_name}\n"
                 f"Error type: {error_type}\n"
                 f"Error examples: {json.dumps(examples, ensure_ascii=False)}\n"

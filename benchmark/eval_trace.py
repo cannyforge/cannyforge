@@ -578,12 +578,8 @@ class TraceEvaluator:
         # recovery calls that lead to success should not score lower than a fast
         # failure.  This prevents the formula from rewarding failing-fast over
         # succeeding-slowly (coding_003 regression).
-        task_succeeded = any(
-            e.get("task_succeeded") or e.get("outcome") == "success"
-            for e in trace
-            if isinstance(e, dict)
-        )
-        if task_succeeded and raw < 0.5:
+        task_made_progress = any(e.status == "ok" for e in trace)
+        if task_made_progress and raw < 0.5:
             raw = 0.5
         return raw
 
