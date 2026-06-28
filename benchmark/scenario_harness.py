@@ -822,9 +822,11 @@ class LLMScenarioRunner:
           - expected_trace.calls[*].args_contain
           - error_injections[*].condition (excluding reserved keys)
 
-        Each parameter is typed as Optional[str] so the model can omit any of
-        them without a validation error, while still allowing LangChain to pass
-        the values through rather than stripping them.
+        Each parameter is typed as Optional[str] by default.  When an
+        error_injection declares arg_type_mismatch for a parameter the type
+        hint is set to match the *expected* (correct) type so the LLM JSON
+        schema communicates the right type and Pydantic does not reject a
+        correct integer/float/bool value before the tool function can execute.
         """
         try:
             from pydantic import BaseModel, create_model
@@ -836,15 +838,33 @@ class LLMScenarioRunner:
             if call.get("tool") == tool_name:
                 param_names.update(call.get("args_contain", {}).keys())
         reserved = {"tool", "call_index", "missing_prior"}
+
+        # Collect arg_type_mismatch hints: the value is the *correct* type that
+        # the error injection expects.  e.g. {"offset": "int"} means offset must
+        # be an int; passing a string will trigger the error injection.
+        _TYPE_MAP = {"int": int, "float": float, "bool": bool, "str": str}
+        type_hints: Dict[str, type] = {}
         for inj in scenario.get("error_injections", []):
-            for key in inj.get("condition", {}):
+            cond = inj.get("condition", {})
+            for key in cond:
                 if key not in reserved:
                     param_names.add(key)
+            for arg_name, expected_type_str in cond.get("arg_type_mismatch", {}).items():
+                py_type = _TYPE_MAP.get(str(expected_type_str), str)
+                type_hints[arg_name] = py_type
 
         if not param_names:
             return None
 
-        fields = {p: (Optional[str], None) for p in param_names}
+        from typing import Union
+        fields = {}
+        for p in param_names:
+            if p in type_hints and type_hints[p] is not str:
+                # Allow the correct type OR string so the LLM can pass either;
+                # the MockToolRouter decides whether to fire the error injection.
+                fields[p] = (Optional[Union[type_hints[p], str]], None)  # type: ignore[valid-type]
+            else:
+                fields[p] = (Optional[str], None)
         return create_model(f"{tool_name}_args", **fields)
 
     @staticmethod
