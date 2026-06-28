@@ -837,8 +837,13 @@ class LLMScenarioRunner:
         for call in scenario.get("expected_trace", {}).get("calls", []):
             if call.get("tool") == tool_name:
                 param_names.update(call.get("args_contain", {}).keys())
-        reserved = {"tool", "call_index", "missing_prior"}
 
+        # Meta-keys in the condition dict describe the *type* of check, not arg names.
+        # Only the inner keys of arg_type_mismatch / arg_format_mismatch are real args.
+        _META_COND_KEYS = {
+            "tool", "call_index", "missing_prior",
+            "arg_type_mismatch", "arg_format_mismatch", "has_unexpected_arg",
+        }
         # Collect arg_type_mismatch hints: the value is the *correct* type that
         # the error injection expects.  e.g. {"offset": "int"} means offset must
         # be an int; passing a string will trigger the error injection.
@@ -847,11 +852,14 @@ class LLMScenarioRunner:
         for inj in scenario.get("error_injections", []):
             cond = inj.get("condition", {})
             for key in cond:
-                if key not in reserved:
+                if key not in _META_COND_KEYS:
                     param_names.add(key)
             for arg_name, expected_type_str in cond.get("arg_type_mismatch", {}).items():
+                param_names.add(arg_name)
                 py_type = _TYPE_MAP.get(str(expected_type_str), str)
                 type_hints[arg_name] = py_type
+            for arg_name in cond.get("arg_format_mismatch", {}):
+                param_names.add(arg_name)
 
         if not param_names:
             return None

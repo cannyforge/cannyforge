@@ -332,6 +332,17 @@ class CorrectionGenerator:
         carries structured expected/actual dicts we can generate a concrete rule like
         "when calling read_file, pass offset as an integer, not a string."
         """
+        _PATTERN_HINTS: List[Tuple[str, str]] = [
+            # integer / numeric
+            (r"0-9", "an integer"),
+            # ISO date
+            (r"\\d\{4\}.*\\d\{2\}.*\\d\{2\}", "ISO 8601 date format (YYYY-MM-DD)"),
+            # conventional commits  e.g. ^(feat|fix|...)...
+            (r"\(feat\|fix", "Conventional Commits format, e.g. `feat(scope): description`"),
+            # uuid
+            (r"[0-9a-f]\{8\}.*[0-9a-f]\{4\}", "UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"),
+        ]
+
         for failure in failures:
             expected = getattr(failure, "expected", {}) or {}
             actual = getattr(failure, "actual", {}) or {}
@@ -343,7 +354,7 @@ class CorrectionGenerator:
             actual_args = actual.get("args", {}) or {}
 
             # Find args that are in expected but missing from actual, or carry a
-            # regex-style constraint (starts with ^) indicating a type requirement.
+            # regex-style constraint (starts with ^) indicating a format requirement.
             failing_args: List[Tuple[str, str]] = []
             for arg_name, expected_val in expected_args.items():
                 actual_val = actual_args.get(arg_name)
@@ -357,17 +368,26 @@ class CorrectionGenerator:
 
             arg_name, expected_pattern = failing_args[0]
 
-            # Derive a human-readable type hint from the regex pattern.
-            if "0-9" in expected_pattern:
-                type_desc = f"an integer (e.g. `{arg_name}=7`)"
-            elif expected_pattern.startswith("^") and expected_pattern.endswith("$"):
-                type_desc = f"a value matching `{expected_pattern}`"
-            else:
-                type_desc = "the correct type per the tool schema"
+            # Derive a human-readable format description from the regex pattern.
+            type_desc = ""
+            for fragment, hint in _PATTERN_HINTS:
+                if re.search(fragment, expected_pattern):
+                    type_desc = hint
+                    break
+            if not type_desc:
+                if "0-9" in expected_pattern:
+                    type_desc = "an integer"
+                elif expected_pattern.startswith("^") and expected_pattern.endswith("$"):
+                    type_desc = f"the required format"
 
+            if type_desc:
+                return (
+                    f"When calling `{tool}`, pass `{arg_name}` as {type_desc}. "
+                    f"Do not pass `{arg_name}` in an unexpected format."
+                )
             return (
-                f"When calling `{tool}`, pass `{arg_name}` as {type_desc}. "
-                f"Do not omit `{arg_name}` or pass it as a string."
+                f"When calling `{tool}`, ensure `{arg_name}` matches the required "
+                f"format before calling."
             )
 
         return None
