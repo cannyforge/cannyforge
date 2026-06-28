@@ -453,9 +453,19 @@ class MockToolRouter:
                 contacts = self._setup.get("contacts", {})
                 known = [v["email"] for v in contacts.values() if v.get("email")]
                 hint = f" Known contacts: {', '.join(known)}." if known else ""
+                # Return the full contacts map as structured data so the LLM
+                # (or a correction) can match the intended recipient against the
+                # task text.  We deliberately do NOT guess a single "resolved"
+                # contact — picking the wrong one (e.g. Alice when the task says
+                # Bob) is worse than providing all of them neutrally.
+                example = f" to='{known[0]}'" if known else ""
                 return {"status": "error", "code": "MISSING_RECIPIENT",
                         "message": ("Required field 'to' is missing. "
-                                    f"Pass the recipient address as to='user@example.com'.{hint}")}
+                                    f"Pass the recipient address as{example}.{hint}"),
+                        "available_contacts": {
+                            k: v.get("email", v.get("name", k))
+                            for k, v in contacts.items()
+                        }}
             return {"status": "ok",
                     "message_id": f"MSG-{abs(hash(to + subject)) % 9999:04d}",
                     "to": to, "subject": subject}
@@ -814,6 +824,19 @@ class LLMScenarioRunner:
             task_succeeded=task_succeeded,
         )
 
+    # Params that must always be in the schema for a tool because the mock
+    # router requires them to function.  Without these the LLM's generated
+    # function call may be rejected at the transport layer (e.g. send_email
+    # called without ``to``) and the model has no way to add the missing arg
+    # because the Pydantic schema strips it.
+    _TOOL_CORE_PARAMS: Dict[str, set] = {
+        "send_email": {"to", "subject", "body"},
+        "check_calendar": {"date"},
+        "schedule_meeting": {"date", "time"},
+        "read_file": {"file_path"},
+        "search_web": {"query"},
+    }
+
     @staticmethod
     def _schema_for_tool(tool_name: str, scenario: Dict) -> Any:
         """Build a Pydantic args schema for a tool from its scenario declarations.
@@ -821,6 +844,7 @@ class LLMScenarioRunner:
         Collects parameter names from:
           - expected_trace.calls[*].args_contain
           - error_injections[*].condition (excluding reserved keys)
+          - _TOOL_CORE_PARAMS (tool-level required parameters)
 
         Each parameter is typed as Optional[str] by default.  When an
         error_injection declares arg_type_mismatch for a parameter the type
@@ -834,6 +858,9 @@ class LLMScenarioRunner:
             return None
 
         param_names: set = set()
+        # Always include core params so the LLM can pass required fields
+        # even when the scenario's args_contain doesn't enumerate them.
+        param_names.update(LLMScenarioRunner._TOOL_CORE_PARAMS.get(tool_name, set()))
         for call in scenario.get("expected_trace", {}).get("calls", []):
             if call.get("tool") == tool_name:
                 param_names.update(call.get("args_contain", {}).keys())

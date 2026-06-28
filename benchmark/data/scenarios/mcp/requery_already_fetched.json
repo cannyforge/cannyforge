@@ -34,12 +34,14 @@
       {
         "tool": "send_email",
         "args_contain": {
-          "subject": "python|release"
+          "to": "@",
+          "subject": "python|release",
+          "body": "."
         },
         "optional": false
       }
     ],
-    "ordering": "strict",
+    "ordering": "partial",
     "max_calls": 4
   },
   "anti_patterns": [
