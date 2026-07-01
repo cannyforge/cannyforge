@@ -589,6 +589,7 @@ class RunResult:
     rules_applied_count: int = 0
     task_succeeded: Optional[bool] = None   # ground-truth outcome from success_condition
     error: Optional[str] = None
+    trial: int = 0  # 0-indexed trial number for Pass^k
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1049,6 +1050,8 @@ class ScenarioHarness:
             "baseline": [], "static": [], "cannyforge": [], "static+cf": []
         }
 
+        pass_k = getattr(self, "_pass_k", 1)
+
         def _run_or_load(phase: str, runner, label: str) -> List[RunResult]:
             if run_dir is not None:
                 cached = _load_phase_checkpoint(run_dir, phase)
@@ -1057,12 +1060,32 @@ class ScenarioHarness:
                     print(f"\n[{label}] resumed from checkpoint "
                           f"({ok}/{len(cached)} composite≥0.5)")
                     return cached
-            print(f"\n[{label}] {len(self.scenarios)} scenarios...")
+            n_scenarios = len(self.scenarios)
+            total_runs = n_scenarios * pass_k
+            print(f"\n[{label}] {n_scenarios} scenarios × {pass_k} runs = {total_runs} total...")
             phase_results: List[RunResult] = []
             for s in self.scenarios:
-                r = runner.run(s, phase)
-                phase_results.append(r)
-                _print_result(r)
+                for trial in range(pass_k):
+                    r = runner.run(s, phase)
+                    if pass_k > 1:
+                        r = RunResult(
+                            scenario_id=r.scenario_id,
+                            condition=r.condition,
+                            score=r.score,
+                            trace=r.trace,
+                            elapsed_ms=r.elapsed_ms,
+                            correction_injected=r.correction_injected,
+                            correction_injected_count=r.correction_injected_count,
+                            rules_applied_count=r.rules_applied_count,
+                            task_succeeded=r.task_succeeded,
+                            error=r.error,
+                        )
+                        # Tag trial number for Pass^k computation
+                        r.trial = trial  # type: ignore[attr-defined]
+                    phase_results.append(r)
+                    if pass_k > 1:
+                        _vprint(f"  [{trial+1}/{pass_k}]")
+                    _print_result(r)
             if run_dir is not None:
                 _save_phase_checkpoint(run_dir, phase, phase_results)
             return phase_results
@@ -1503,7 +1526,7 @@ class ScenarioHarness:
             if not run_list:
                 continue
             n = len(run_list)
-            out[condition] = {
+            stat: Dict[str, Any] = {
                 "mean_composite": round(sum(r.score.composite_score for r in run_list) / n, 3),
                 "mean_tool_selection": round(sum(r.score.tool_selection_score for r in run_list) / n, 3),
                 "mean_arg_quality": round(sum(r.score.arg_quality_score for r in run_list) / n, 3),
@@ -1523,6 +1546,22 @@ class ScenarioHarness:
                 ),
                 "n": n,
             }
+
+            # Pass^k: group by scenario_id + condition, count consecutive successes
+            pass_k = getattr(self, "_pass_k", 1)
+            if pass_k > 1:
+                groups: Dict[str, List[bool]] = {}
+                for r in run_list:
+                    key = f"{r.scenario_id}"
+                    groups.setdefault(key, []).append(r.task_succeeded is True)
+                for level in range(1, pass_k + 1):
+                    passed = sum(
+                        1 for outcomes in groups.values()
+                        if sum(outcomes[:level]) >= level
+                    )
+                    stat[f"pass^{level}"] = round(passed / len(groups), 3) if groups else 0.0
+
+            out[condition] = stat
         return out
 
     def print_summary(self, results: Dict[str, List[RunResult]]) -> None:
@@ -1551,6 +1590,22 @@ class ScenarioHarness:
                 f"{s['mean_corrections_injected']:>10.3f}"
                 f"{s['mean_rules_applied']:>12.3f}{s['n']:>6}"
             )
+
+        # Pass^k reliability (only when --passk > 1)
+        pass_k = getattr(self, "_pass_k", 1)
+        if pass_k > 1:
+            print(f"\n--- Pass^k Reliability (k={pass_k}) ---")
+            pk_hdr = f"{'condition':<15}"
+            for level in range(1, pass_k + 1):
+                pk_hdr += f"{'Pass^'+str(level):>10}"
+            print(pk_hdr)
+            print("-" * len(pk_hdr))
+            for cond in ordered:
+                s = stats[cond]
+                row = f"{cond:<15}"
+                for level in range(1, pass_k + 1):
+                    row += f"{s.get(f'pass^{level}', 0.0):>10.3f}"
+                print(row)
 
         # Domain breakdown
         dom = self.results_by_domain(results)
@@ -1985,6 +2040,9 @@ def main() -> None:
                         help="Resume from a previous run directory (skips completed phases)")
     parser.add_argument("--scenario", default=None, metavar="SCENARIO_ID",
                         help="Run only this scenario ID (e.g. data_004) — all conditions, verbose detail")
+    parser.add_argument("--passk", type=int, default=1, metavar="K",
+                        help="Number of runs per scenario for Pass^k reliability "
+                             "(default: 1 = single-run)")
     parser.add_argument("--verbose", action="store_true",
                         help="Print per-turn trace, CF injection, and score breakdown for each scenario")
     parser.add_argument(
@@ -2066,6 +2124,7 @@ def main() -> None:
         }
 
         harness._verbose = getattr(args, "verbose", False)
+        harness._pass_k = max(1, getattr(args, "passk", 1))
 
         results = harness.run_ablation_with_llm(
             llm=llm, forge=forge, skill_name="tool_use",
