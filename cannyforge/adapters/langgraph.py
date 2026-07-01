@@ -847,7 +847,11 @@ class CannyForgeMiddleware:
         all_skill_names = self._resolve_active_skill_names(merged_state_dict)
         raw_corrections: List = []
         for sk in all_skill_names:
-            raw_corrections.extend(self._forge.knowledge_base.get_corrections(sk))
+            raw_corrections.extend(
+                self._forge.knowledge_base.get_corrections(
+                    sk, apply_stability_gate=True,
+                )
+            )
         task_description = context.get("task", {}).get("description", "")
         observed_error_types: FrozenSet[str] = frozenset(
             entry["error_type"]

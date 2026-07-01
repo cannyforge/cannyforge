@@ -29,17 +29,76 @@ class Correction:
     created_at: float
     times_injected: int = 0
     times_effective: int = 0
+    times_ineffective: int = 0
     correction_type: str = ""  # e.g. "sequence", "retry", "hallucination", "tool_selection"
     trigger_keywords: List[str] = field(default_factory=list)
     trigger_task_families: List[str] = field(default_factory=list)
     trigger_transfer_clusters: List[str] = field(default_factory=list)
 
+    # Minimum observations before stability gate activates (aligned with
+    # adapter's MIN_INJECTIONS_FOR_DEPRECATION so probation and deprecation
+    # share the same observation floor).
+    _MIN_OBSERVATIONS: int = 5
+    # Effectiveness below this ratio → skip injection (rapid-reaction stability gate).
+    _SKIP_EFFECTIVENESS: float = 0.20
+    # Pruning thresholds (mirrors adapter's MIN_INJECTIONS_FOR_DEPRECATION + MIN_EFFECTIVENESS_TO_KEEP).
+    _PRUNE_MIN_OBSERVATIONS: int = 5
+    _PRUNE_EFFECTIVENESS: float = 0.30
+
+    @property
+    def _observed_total(self) -> int:
+        """Total observed outcomes, handling legacy data.
+
+        Legacy corrections only tracked ``times_injected`` and
+        ``times_effective`` — the implicit ineffective count is
+        ``times_injected - times_effective``.  When ``times_ineffective``
+        is still zero but ``times_injected > times_effective`` we know
+        ineffective outcomes happened but weren't recorded, so fall back
+        to ``times_injected`` as the denominator.
+        """
+        if self.times_ineffective == 0 and self.times_injected > self.times_effective:
+            return self.times_injected
+        return self.times_effective + self.times_ineffective
+
     @property
     def effectiveness(self) -> float:
-        """Fraction of injections that were effective. -1.0 if never injected."""
-        if self.times_injected == 0:
+        """Fraction of injections that were effective. -1.0 if never observed."""
+        total = self._observed_total
+        if total == 0:
             return -1.0
-        return self.times_effective / self.times_injected
+        return self.times_effective / total
+
+    @property
+    def eir(self) -> float:
+        """Error Injection Rate: fraction of injections where task still failed."""
+        total = self._observed_total
+        if total == 0:
+            return -1.0
+        return max(0, total - self.times_effective) / total
+
+    @property
+    def ecr(self) -> float:
+        """Error Correction Rate: fraction of injections where task succeeded."""
+        return self.effectiveness
+
+    @property
+    def should_skip(self) -> bool:
+        """Stability gate: skip injection when effectiveness is too low."""
+        if self._observed_total < self._MIN_OBSERVATIONS:
+            return False  # not enough data — let it fire
+        return self.effectiveness < self._SKIP_EFFECTIVENESS
+
+    @property
+    def should_prune(self) -> bool:
+        """Correction is consistently harmful — candidate for removal.
+
+        Higher bar than ``should_skip``: needs more observations and lower
+        effectiveness.  The adapter's ``stale_ineffective`` check adds an
+        additional age gate (30 days) on top of this.
+        """
+        if self._observed_total < self._PRUNE_MIN_OBSERVATIONS:
+            return False  # not enough data
+        return self.effectiveness < self._PRUNE_EFFECTIVENESS
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -51,6 +110,7 @@ class Correction:
             "created_at": self.created_at,
             "times_injected": self.times_injected,
             "times_effective": self.times_effective,
+            "times_ineffective": self.times_ineffective,
             "correction_type": self.correction_type,
             "trigger_keywords": list(self.trigger_keywords),
             "trigger_task_families": list(self.trigger_task_families),
@@ -68,6 +128,7 @@ class Correction:
             created_at=float(data.get("created_at", time())),
             times_injected=int(data.get("times_injected", 0)),
             times_effective=int(data.get("times_effective", 0)),
+            times_ineffective=int(data.get("times_ineffective", 0)),
             correction_type=data.get("correction_type", ""),
             trigger_keywords=list(data.get("trigger_keywords", [])),
             trigger_task_families=list(data.get("trigger_task_families", [])),
