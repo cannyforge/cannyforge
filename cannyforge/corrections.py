@@ -188,25 +188,56 @@ class CorrectionGenerator:
         return self._common_keywords(tasks, max_count=5)
 
     def _derive_trigger_keywords_arg_format(self, failures: List[Any]) -> List[str]:
-        """Derive trigger keywords from the failing tool name, not the task text.
+        """Derive trigger keywords from tool name + task-relevant arg-value tokens.
 
-        Using task-text tokens produces surface keywords that match unrelated tasks
-        (e.g., the task 'Read lines 8-12 of server.py' yields keywords like 'endpoint'
-        and 'users' that also match entirely different scenarios). Tool-name tokens
-        ('read', 'file' from 'read_file') are scoped to the actual tool that failed.
+        Pure tool-name tokens (e.g. ['fetch','economic','data'] from
+        ``fetch_economic_data``) often don't appear in task text — the
+        majority-match gate kills the correction.  Including arg-value tokens
+        that overlap with the task text fixes this: for a failure where the
+        expected arg is ``LABOR_FORCE_2024_Q3_BLS`` and the task contains
+        'labor' and 'force', those tokens bridge the gap.
+
+        The tool-name tokens still provide scoping ('fetch' / 'economic' /
+        'data' won't fire on coding or MCP tasks), and the arg-value tokens
+        ensure at least 2 keywords match a data-domain task.
         """
-        seen: set = set()
-        keywords: List[str] = []
+        tool_tokens: List[str] = []
+        tool_seen: set = set()
         for failure in failures:
             expected = getattr(failure, "expected", {}) or {}
             actual = getattr(failure, "actual", {}) or {}
             tool = expected.get("tool") or actual.get("tool") or ""
             if tool:
                 for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", tool.lower()):
-                    if token not in seen:
-                        keywords.append(token)
-                        seen.add(token)
-        return keywords[:4]
+                    if token not in tool_seen:
+                        tool_tokens.append(token)
+                        tool_seen.add(token)
+
+        # Collect expected arg values across failures, tokenize, and intersect
+        # with each failure's task text so only task-relevant tokens are kept.
+        arg_value_tokens: List[str] = []
+        arg_seen: set = set()
+        for failure in failures:
+            task_text = (getattr(failure, "task_description", "") or "").lower()
+            task_token_set = set(self._tokenize(task_text))
+            expected = getattr(failure, "expected", {}) or {}
+            expected_args = expected.get("args", {}) or {}
+            for arg_name, expected_val in expected_args.items():
+                val_str = str(expected_val).lower()
+                # Split on underscores first — series IDs like
+                # LABOR_FORCE_2024_Q3_BLS use _ as word separator.
+                for segment in val_str.split("_"):
+                    for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", segment):
+                        if len(token) > 2 and token in task_token_set and token not in arg_seen:
+                            arg_value_tokens.append(token)
+                            arg_seen.add(token)
+
+        # Combine: tool tokens first (scoping), then task-overlapping arg tokens
+        keywords = tool_tokens[:4]
+        for token in arg_value_tokens:
+            if token not in tool_seen:
+                keywords.append(token)
+        return keywords[:6]
 
     def _derive_trigger_task_families(self,
                                       errors: List[Any],
@@ -354,19 +385,31 @@ class CorrectionGenerator:
             actual_args = actual.get("args", {}) or {}
 
             # Find args that are in expected but missing from actual, or carry a
-            # regex-style constraint (starts with ^) indicating a format requirement.
+            # regex-style constraint (starts with ^) indicating a format requirement,
+            # or are concrete expected values that differ from what the model passed.
             failing_args: List[Tuple[str, str]] = []
             for arg_name, expected_val in expected_args.items():
                 actual_val = actual_args.get(arg_name)
-                if actual_val is None or (
-                    isinstance(expected_val, str) and expected_val.startswith("^")
-                ):
+                # Regex pattern (format constraint): always include.
+                if isinstance(expected_val, str) and expected_val.startswith("^"):
+                    failing_args.append((arg_name, str(expected_val)))
+                # Concrete value mismatch: model passed wrong (or no) value.
+                elif actual_val is None or str(actual_val) != str(expected_val):
                     failing_args.append((arg_name, str(expected_val)))
 
             if not failing_args:
                 continue
 
             arg_name, expected_pattern = failing_args[0]
+
+            # Concrete value mismatch (not a regex pattern): tell the model the
+            # exact value to use.  e.g. "use series_id='LABOR_FORCE_2024_Q3_BLS'"
+            if not expected_pattern.startswith("^"):
+                return (
+                    f"When calling `{tool}`, pass `{arg_name}` as "
+                    f"`{arg_name}='{expected_pattern}'`. "
+                    f"Do not use a different or guessed value for `{arg_name}`."
+                )
 
             # Derive a human-readable format description from the regex pattern.
             type_desc = ""

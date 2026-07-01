@@ -275,6 +275,15 @@ class MockToolRouter:
             if unexpected_key not in args:
                 return False  # unexpected arg not present — don't inject
 
+        # args_contain: fire only when every arg matches its expected regex.
+        # Supports negative lookahead — e.g. "^(?!UNRATE$).*" matches anything
+        # EXCEPT "UNRATE", gating the injection on an incorrect value.
+        if "args_contain" in condition:
+            for arg_name, pattern in condition["args_contain"].items():
+                val = str(args.get(arg_name, ""))
+                if not re.match(pattern, val, re.IGNORECASE):
+                    return False  # arg doesn't match → condition not met
+
         return True
 
     @staticmethod
