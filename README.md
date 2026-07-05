@@ -27,18 +27,14 @@ agent = create_react_agent(model, tools,
 # After learning, before_model injects corrections as SystemMessages.
 ```
 
-## v0.3 Direction
+## v0.3.1 — Multi-Turn Benchmark Release
 
-The benchmark branch is focused on three adoption-oriented improvements:
+This release ships FSI-80: a 15-scenario multi-turn tool-use benchmark with
+programmatic error injection, six anti-pattern detectors, five-dimensional
+scoring, four-condition ablation, and Pass^k reliability measurement.
 
-- better reliability loops for tool-using agents
-- broader benchmark coverage for arguments, multi-step execution, and recovery
-- portable learned skills for assistant and workflow reuse
-
-This is aimed at modern agent stacks, including LangGraph, LangChain-style tool agents,
-CrewAI-style orchestration, MCP-connected assistants, and personal assistant workflows.
-
-See [docs/v0.3-public.md](docs/v0.3-public.md) for the public summary.
+See [RELEASE-v0.3.1.md](RELEASE-v0.3.1.md) for the full release notes and
+canonical benchmark results.
 
 ## How It Works
 
@@ -84,16 +80,31 @@ This scenario uses tasks specifically designed to have learnable, recurring patt
 
 ## Benchmark
 
-On the FSI-80 harness (15 scenarios × 4 conditions — coding, data, MCP orchestration), the recommended deployment pattern achieves:
+FSI-80: 15 multi-turn scenarios × 4 ablation conditions × 5 scoring dimensions ×
+6 failure-mode detectors × 3 Pass^k reliability trials. Coding, data analysis, and
+MCP orchestration domains.
 
-| Condition | Composite | Recovery | Retry-Loop |
-|---|---|---|---|
-| baseline | 0.910 | 0.867 | 0.864 |
-| static rules only | 0.894 | 0.800 | 0.856 |
-| CannyForge only | 0.900 | 0.867 | 0.864 |
-| **static + CannyForge** | **0.919** | **0.933** | **0.906** |
+```
+              composite   arg_quality   Pass^1   Pass^3   inj_rate
+baseline      0.924       0.837         0.733    0.667    0%
+static        0.925       0.867         0.867    0.800    0%
+cannyforge    0.964       1.000         0.867    0.800    27%
+static+cf     0.962       1.000         0.867    0.867    27%
+```
 
-**static+cf** is the top condition: +0.9 pp over baseline, with the strongest gains on retry-loop recovery (+4.2 pp) and overall recovery behavior (+6.6 pp). Run: `python benchmark/scenario_harness.py --model deepseek-v4-flash --domains coding data mcp --learning-mode paired`. See [docs/ABLATION_STUDY_20260510.md](docs/ABLATION_STUDY_20260510.md) for the full per-scenario breakdown.
+**static+cf** lifts composite +0.038 over baseline, holds Pass^3 at 0.867 with
+zero reliability degradation (baseline degrades -6.6pp from Pass^1 to Pass^3).
+CF alone lifts arg_quality from 0.837 to 1.000.
+
+```bash
+python benchmark/scenario_harness.py \
+    --model deepseek-v4-flash --no-think \
+    --domains coding data mcp --passk 3
+```
+
+See [RELEASE-v0.3.1.md](RELEASE-v0.3.1.md) for the full ablation breakdown and
+[docs/agentic-capacity-framework.md](docs/agentic-capacity-framework.md) for
+the benchmark design framework.
 
 ## Install
 ```bash
