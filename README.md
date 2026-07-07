@@ -41,7 +41,7 @@ canonical benchmark results.
 1. **Record errors** — `after_model` detects tool failures and records them
 2. **Learn corrections** — `run_learning_cycle()` clusters errors and generates specific correction text (template or LLM-generated)
 3. **Inject corrections** — `before_model` prepends a SystemMessage with all active corrections before each LLM call
-4. **Track effectiveness** — corrections are associated with observed failure clusters; pruning based on recurrence is supported via the rule lifecycle
+4. **Track effectiveness** — EIR/ECR tracking records both successful corrections and ineffective injections; a stability gate stops injecting corrections below 20% effectiveness after 5+ observations
 
 The correction is specific and actionable:
 ```
@@ -58,29 +58,16 @@ pip install langgraph langchain-openai
 python scenarios/demo_cannyforge.py
 ```
 
-This runs 15 ambiguous tool-selection tasks twice:
-- **Phase 1**: baseline without corrections — records errors
-- **Learning**: generates corrections from failure clusters
-- **Phase 2**: same tasks with correction injection — repeat errors are reduced
-
-Sample output with DeepSeek on this narrow scenario:
-```
-Phase 1 accuracy: 9/15 (60%)
-Phase 2 accuracy: 15/15 (100%)
-Tasks fixed:
-  - Restart the staging server -> execute_action
-  - Send an alert to the on-call team -> execute_action
-  - Deploy the latest build to production -> execute_action
-  - Create a summary of Q4 sales performance -> generate_report
-  - Write up a status report for this sprint -> generate_report
-  - Generate a monthly uptime report -> generate_report
-```
-
-This scenario uses tasks specifically designed to have learnable, recurring patterns — ideal conditions for correction-based improvement. Results vary on tasks with low repetition or novel failure modes.
+Runs a full correction-learning pipeline on tool-use tasks: baseline → learn from
+errors → re-run with corrections injected. See the benchmark section below for the
+full FSI-80 multi-turn evaluation across coding, data, and MCP domains.
 
 ## Benchmark
 
-FSI-80: 15 multi-turn scenarios × 4 ablation conditions × 5 scoring dimensions ×
+No published benchmark measures arg_quality, sequence adherence, or error recovery
+at the tool-call level with programmatic verification — FSI-80 is the first.
+
+15 multi-turn scenarios × 4 ablation conditions × 5 scoring dimensions ×
 6 failure-mode detectors × 3 Pass^k reliability trials. Coding, data analysis, and
 MCP orchestration domains.
 
@@ -156,7 +143,7 @@ cannyforge/core.py           — CannyForge orchestrator
 ```
 
 **CorrectionGenerator** turns error clusters into actionable text:
-- **Template mode** (no LLM): groups by `(wrong_tool, right_tool)`, extracts keywords, formats guidance
+- **Template mode** (no LLM): groups failures by tool within error_type, extracts keywords from tool name + expected arg values, formats tool-specific guidance
 - **LLM mode**: sends error cluster to LLM asking for a generalized rule covering unseen tasks
 
 **CannyForgeMiddleware** hooks into LangGraph's `create_react_agent`:
@@ -259,4 +246,4 @@ For commercial licensing inquiries: cannyforge@gmail.com
 
 ---
 
-**CannyForge** — Your agent makes fewer repeated mistakes over time, with measurable evidence.
+**CannyForge** — Your agent makes fewer repeated mistakes over time. [FSI-80 proves it.](RELEASE-v0.3.1.md)
