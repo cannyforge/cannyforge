@@ -17,11 +17,12 @@ Usage (3 lines to integrate):
 Requires: pip install langgraph>=0.2.0
 """
 
+import contextlib
 import json
 import logging
 import threading
 from time import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from cannyforge.failures import get_failure_class_for_error, get_failure_definition, runtime_supports_error
 
@@ -109,6 +110,15 @@ class CannyForgeMiddleware:
     @_task_corrections_injected.setter
     def _task_corrections_injected(self, value: List[str]):
         self._local.task_corrections_injected = value
+
+    # Public aliases used by the benchmark harness (no underscore prefix)
+    @property
+    def task_corrections_injected(self) -> List[str]:
+        return self._task_corrections_injected
+
+    @property
+    def task_rules_applied(self) -> List[str]:
+        return self._task_rules_applied
 
     @property
     def _task_injection_signatures(self) -> set[str]:
@@ -438,12 +448,20 @@ class CannyForgeMiddleware:
         if not tool_name:
             return 1.0
 
+        available_set = set(available_tools) if available_tools else set()
         expected_tools = set(required_steps)
         if expected_tools:
-            return 0.95 if tool_name in expected_tools else 0.3
+            if tool_name in expected_tools:
+                return 0.95
+            # Available-but-unexpected tool (e.g., fallback during retry loop).
+            # Not a hallucination — keep above the WrongToolError threshold (0.6)
+            # so the WrongTool rule does not fire for legitimate exploration.
+            if available_set and tool_name in available_set:
+                return 0.65
+            return 0.3  # genuinely hallucinated (not even in available tools)
 
-        if available_tools:
-            return 0.7 if tool_name in set(available_tools) else 0.0
+        if available_set:
+            return 0.7 if tool_name in available_set else 0.0
 
         return 0.5
 
@@ -580,12 +598,32 @@ class CannyForgeMiddleware:
             return ""
         return json.dumps(payload, sort_keys=True)
 
-    def _correction_priority(self, correction: Any) -> tuple[int, int, int, int]:
+    # Error types that should inject broadly even without a live observed
+    # signal — because their failures are organic (not error-injection-driven)
+    # and the adapter's observed_error_types tracker will never see them.
+    _BROAD_INJECT_ERROR_TYPES: FrozenSet[str] = frozenset({
+        "RetryLoopError",
+        "ContextMissError",
+    })
+
+    def _correction_priority(
+        self,
+        correction: Any,
+        observed_error_types: FrozenSet[str] = frozenset(),
+    ) -> tuple[int, int, int, int, int]:
+        error_type = getattr(correction, "error_type", "")
+        error_match = int(
+            bool(observed_error_types)
+            and error_type in observed_error_types
+        )
+        # Broad-inject types get a baseline match score even without a live
+        # observed signal, so they're not silently deprioritised.
+        broad_inject = int(not error_match and error_type in self._BROAD_INJECT_ERROR_TYPES)
         structured_scope = int(bool(getattr(correction, "trigger_transfer_clusters", [])))
         family_scope = int(bool(getattr(correction, "trigger_task_families", [])))
         keyword_scope = int(bool(getattr(correction, "trigger_keywords", [])))
-        runtime_sensitive = int(self._is_runtime_sensitive_error_type(getattr(correction, "error_type", "")))
-        return (runtime_sensitive, structured_scope, family_scope, keyword_scope)
+        runtime_sensitive = int(self._is_runtime_sensitive_error_type(error_type))
+        return (error_match, broad_inject, runtime_sensitive, structured_scope, family_scope, keyword_scope)
 
     def _select_corrections(
         self,
@@ -593,6 +631,7 @@ class CannyForgeMiddleware:
         *,
         context: Dict[str, Any],
         task_description: str,
+        observed_error_types: FrozenSet[str] = frozenset(),
     ) -> tuple[List[Any], List[Dict[str, Any]]]:
         accepted: List[Any] = []
         decisions: List[Dict[str, Any]] = []
@@ -671,7 +710,7 @@ class CannyForgeMiddleware:
                 }
             )
 
-        accepted.sort(key=self._correction_priority, reverse=True)
+        accepted.sort(key=lambda c: self._correction_priority(c, observed_error_types), reverse=True)
         return accepted, decisions
 
     def _append_task_debug_record(self, record: Dict[str, Any]) -> None:
@@ -808,12 +847,22 @@ class CannyForgeMiddleware:
         all_skill_names = self._resolve_active_skill_names(merged_state_dict)
         raw_corrections: List = []
         for sk in all_skill_names:
-            raw_corrections.extend(self._forge.knowledge_base.get_corrections(sk))
+            raw_corrections.extend(
+                self._forge.knowledge_base.get_corrections(
+                    sk, apply_stability_gate=True,
+                )
+            )
         task_description = context.get("task", {}).get("description", "")
+        observed_error_types: FrozenSet[str] = frozenset(
+            entry["error_type"]
+            for entry in self._task_observed_errors
+            if entry.get("error_type")
+        )
         corrections, correction_decisions = self._select_corrections(
             raw_corrections,
             context=context,
             task_description=task_description,
+            observed_error_types=observed_error_types,
         )
 
         # Conditional rules (backward-compatible path)
@@ -905,6 +954,19 @@ class CannyForgeMiddleware:
             or any(self._is_runtime_sensitive_error_type(rule.source_error_type) for rule in applicable)
         )
         ai_turns = sum(1 for m in messages if self._get_message_type(m) == "ai")
+
+        # Auto-reset stale per-task state when a new task begins (turn 0).
+        # This guards against state bleed when begin_task() is not called manually.
+        if ai_turns == 0 and (
+            self._task_seen_correction_ids
+            or self._task_injection_signatures
+            or self._task_observed_errors
+        ):
+            saved_defaults = dict(self._task_state_defaults)
+            self.begin_task()
+            self._task_state_defaults = saved_defaults
+            logger.debug("Auto-reset task state at turn 0 (begin_task not called manually)")
+
         debug_record = {
             "turn_index": ai_turns,
             "task_description": task_description,
@@ -1134,3 +1196,32 @@ class CannyForgeMiddleware:
     def task_observed_errors(self) -> List[Dict[str, Any]]:
         """Return observed tool/runtime errors for the current task."""
         return [dict(record) for record in self._task_observed_errors]
+
+    @contextlib.contextmanager
+    def task(self):
+        """Context manager for a single agent task lifecycle.
+
+        Calls ``begin_task()`` on entry and ``finalize_task(success)`` on exit.
+        The yielded callable should be invoked with ``True`` if the task
+        succeeded, ``False`` otherwise.  If the block raises an exception the
+        task is finalized as failed.
+
+        Example::
+
+            with middleware.task() as outcome:
+                result = agent.invoke(input)
+                outcome(check_success(result))
+        """
+        self.begin_task()
+        _outcome: List[bool] = [False]
+
+        def set_outcome(success: bool = True) -> None:
+            _outcome[0] = success
+
+        try:
+            yield set_outcome
+        except Exception:
+            self.finalize_task(False)
+            raise
+        else:
+            self.finalize_task(_outcome[0])

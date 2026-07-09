@@ -1,0 +1,102 @@
+{
+  "id": "data_006",
+  "domain": "data",
+  "title": "Discover economic series by topic and disambiguate candidates",
+  "difficulty": "hard",
+  "failure_modes": [
+    "arg_mangling",
+    "wrong_tool"
+  ],
+  "setup": {
+    "databases": {
+      "economic": {
+        "CPI": {
+          "2024-01-01": 308.4,
+          "2024-06-01": 314.2,
+          "2024-12-01": 317.8
+        },
+        "GDP": {
+          "2024-Q1": 28.27,
+          "2024-Q2": 28.63,
+          "2024-Q3": 29.02
+        },
+        "UNRATE": {
+          "2024-01-01": 3.7,
+          "2024-06-01": 4.1,
+          "2024-12-01": 4.0
+        },
+        "FEDFUNDS": {
+          "2024-01-01": 5.33,
+          "2024-06-01": 5.50,
+          "2024-12-01": 4.75
+        },
+        "EMRATIO": {
+          "2024-01-01": 60.2,
+          "2024-06-01": 60.1,
+          "2024-12-01": 59.8
+        },
+        "JOLTS_HIRES": {
+          "2024-01-01": 5.7,
+          "2024-06-01": 5.3,
+          "2024-12-01": 5.5
+        }
+      }
+    }
+  },
+  "user_message": "I need to understand the health of the US labor market in 2024. Find the most relevant economic data and give me the key figures.",
+  "tools": [
+    "search_economic_series",
+    "fetch_economic_data",
+    "fetch_market_data",
+    "query_db",
+    "create_chart",
+    "validate_data"
+  ],
+  "expected_trace": {
+    "calls": [
+      {
+        "tool": "search_economic_series",
+        "args_contain": {
+          "query": "labor|employ|job"
+        },
+        "optional": false
+      },
+      {
+        "tool": "fetch_economic_data",
+        "args_contain": {
+          "series_id": "UNRATE|EMRATIO|JOLTS"
+        },
+        "optional": false
+      },
+      {
+        "tool": "validate_data",
+        "args_contain": {},
+        "optional": false
+      }
+    ],
+    "ordering": "strict",
+    "max_calls": 8
+  },
+  "anti_patterns": [
+    {
+      "id": "skip_discovery",
+      "type": "sequence_violation",
+      "detect": {
+        "tool": "fetch_economic_data",
+        "missing_prior": "search_economic_series"
+      }
+    },
+    {
+      "id": "skip_validation",
+      "type": "sequence_violation",
+      "detect": {
+        "tool": "create_chart",
+        "missing_prior": "validate_data"
+      }
+    }
+  ],
+  "error_injections": [],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
+}

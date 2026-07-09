@@ -1,0 +1,90 @@
+{
+  "id": "data_003",
+  "domain": "data",
+  "title": "Learn unknown economic series ID from error recovery",
+  "difficulty": "hard",
+  "failure_modes": [
+    "retry_loop",
+    "arg_mangling"
+  ],
+  "setup": {
+    "databases": {
+      "economic": {
+        "CPI": {
+          "2024-01-01": 308.4,
+          "2024-06-01": 314.2,
+          "2024-12-01": 317.8
+        },
+        "GDP": {
+          "2024-Q1": 28.27,
+          "2024-Q2": 28.63,
+          "2024-Q3": 29.02
+        },
+        "UNRATE": {
+          "2024-01-01": 3.7,
+          "2024-06-01": 4.1,
+          "2024-12-01": 4.0
+        },
+        "FEDFUNDS": {
+          "2024-01-01": 5.33,
+          "2024-06-01": 5.50,
+          "2024-12-01": 4.75
+        },
+        "LABOR_FORCE_2024_Q3_BLS": {
+          "2024-07-01": 168.7,
+          "2024-08-01": 168.9,
+          "2024-09-01": 168.5
+        }
+      }
+    }
+  },
+  "user_message": "Get the US labor force participation count for Q3 2024 from the economic database",
+  "tools": [
+    "fetch_economic_data",
+    "fetch_market_data",
+    "query_db",
+    "create_chart",
+    "validate_data"
+  ],
+  "expected_trace": {
+    "calls": [
+      {
+        "tool": "fetch_economic_data",
+        "args_contain": {
+          "series_id": "LABOR_FORCE"
+        },
+        "optional": false
+      }
+    ],
+    "ordering": "partial",
+    "max_calls": 4
+  },
+  "anti_patterns": [
+    {
+      "id": "query_retry_loop",
+      "type": "retry_loop",
+      "detect": {
+        "type": "retry_loop",
+        "min_repeats": 3
+      }
+    }
+  ],
+  "error_injections": [
+    {
+      "condition": {
+        "tool": "fetch_economic_data",
+        "call_index": 0,
+        "args_contain": {
+          "series_id": "^(?!LABOR_FORCE_2024_Q3_BLS$).*"
+        }
+      },
+      "response": {
+        "status": "error",
+        "message": "SeriesNotFound: that series ID was not found. Available economic series: CPI, GDP, UNRATE, FEDFUNDS, LABOR_FORCE_2024_Q3_BLS."
+      }
+    }
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
+}

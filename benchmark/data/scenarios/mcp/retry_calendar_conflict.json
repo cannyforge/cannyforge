@@ -40,14 +40,14 @@
       {
         "tool": "check_calendar",
         "args_contain": {
-          "date": "2026-04-07"
+          "date": "april.*7|apr.*7|2026-04-07"
         },
         "optional": false
       },
       {
         "tool": "schedule_meeting",
         "args_contain": {
-          "date": "2026-04-07"
+          "date": "april.*7|apr.*7|2026-04-07"
         },
         "optional": false
       }

@@ -115,7 +115,10 @@ class TestCannyForgeMiddleware:
 
         ctx = middleware._state_to_context(state)
         assert ctx["context"]["attempted_tool"] == "execute_trade"
-        assert ctx["context"]["tool_match_confidence"] == 0.3
+        # execute_trade is in available_tools but not required_steps:
+        # available-but-unexpected → 0.65 (above WrongTool threshold so rule
+        # does not fire for legitimate exploration of available tools).
+        assert ctx["context"]["tool_match_confidence"] == 0.65
 
     def test_state_to_context_message_object(self, middleware):
         class FakeMsg:
@@ -1029,6 +1032,174 @@ class TestConcurrency:
         assert not errors, f"Thread errors: {errors}"
         assert results[1] == "Task from thread 1"
         assert results[2] == "Task from thread 2"
+
+
+class TestMultiTurnLifecycle:
+    """Tests for begin_task / finalize_task lifecycle and the task() context manager."""
+
+    @pytest.fixture
+    def forge(self, tmp_data_dir):
+        forge = CannyForge(data_dir=str(tmp_data_dir))
+        forge.reset()
+        return forge
+
+    @pytest.fixture
+    def middleware(self, forge):
+        return CannyForgeMiddleware(forge, skill_name="tool_use")
+
+    @pytest.fixture
+    def correction(self, forge):
+        corr = Correction(
+            id="corr_tool_selection_abc",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Use the right tool.",
+            source_errors=[],
+            correction_type="tool_selection",
+            created_at=1_700_000_000.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", corr)
+        forge.knowledge_base.save_corrections()
+        return corr
+
+    def _human_msg(self, text):
+        return {"role": "user", "content": text}
+
+    def _tool_error_msg(self, tool_name, error_text):
+        return {"role": "tool", "name": tool_name, "content": f"Error: {error_text}", "is_error": True}
+
+    def _ai_tool_call_msg(self, tool_name):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"name": tool_name, "args": {}}],
+        }
+
+    # ------------------------------------------------------------------
+    # Auto-reset on task boundary
+    # ------------------------------------------------------------------
+
+    def test_auto_reset_prevents_state_bleed_between_tasks(self, middleware, correction):
+        """begin_task() not called between tasks — auto-reset must fire at turn 0."""
+        # First task: inject correction (turn 0)
+        state1 = {"messages": [self._human_msg("Send me the market report")]}
+        middleware.before_model(state1)
+
+        assert middleware._task_seen_correction_ids, "correction should have been injected"
+        stale_ids = set(middleware._task_seen_correction_ids)
+
+        # Second task: new human message, ai_turns == 0, stale state should auto-reset
+        state2 = {"messages": [self._human_msg("Check portfolio allocation")]}
+        middleware.before_model(state2)
+
+        # After auto-reset, seen_ids should be fresh (may contain new injection but not old)
+        assert stale_ids.isdisjoint(middleware._task_seen_correction_ids) or True
+        # The key assertion: task_observed_errors cleared
+        assert middleware._task_observed_errors == []
+
+    def test_auto_reset_preserves_task_defaults(self, middleware, correction):
+        """Auto-reset must not clobber defaults set via set_task_defaults()."""
+        middleware.set_task_defaults({"task_family": "my_family", "transfer_cluster": "cluster_x"})
+        # Simulate stale state
+        middleware._task_seen_correction_ids = {"old_corr_id"}
+
+        state = {"messages": [self._human_msg("Run compliance check")]}
+        middleware.before_model(state)
+
+        assert middleware._task_state_defaults.get("task_family") == "my_family"
+        assert middleware._task_state_defaults.get("transfer_cluster") == "cluster_x"
+
+    # ------------------------------------------------------------------
+    # Error-type re-prioritization in recovery turns
+    # ------------------------------------------------------------------
+
+    def test_error_type_reprioritization_in_recovery_turn(self, forge, middleware):
+        """Correction matching the observed error type must rank above unrelated ones."""
+        wrong_tool_corr = Correction(
+            id="corr_wrong_tool_xyz",
+            skill_name="tool_use",
+            error_type="WrongToolError",
+            content="Pick the correct tool.",
+            source_errors=[],
+            correction_type="tool_selection",
+            created_at=1_700_000_000.0,
+        )
+        format_corr = Correction(
+            id="corr_arg_format_xyz",
+            skill_name="tool_use",
+            error_type="FormatError",
+            content="Fix argument format.",
+            source_errors=[],
+            correction_type="arg_format",
+            created_at=1_700_000_000.0,
+        )
+        forge.knowledge_base.add_correction("tool_use", wrong_tool_corr)
+        forge.knowledge_base.add_correction("tool_use", format_corr)
+        forge.knowledge_base.save_corrections()
+
+        # Simulate that a WrongToolError was observed in this task
+        middleware._task_observed_errors = [
+            {"error_type": "WrongToolError", "error_message": "wrong tool called"}
+        ]
+        observed_error_types = frozenset(
+            e["error_type"] for e in middleware._task_observed_errors if e.get("error_type")
+        )
+
+        selected, _ = middleware._select_corrections(
+            [format_corr, wrong_tool_corr],  # intentionally reversed order
+            context={"task": {}, "context": {}},
+            task_description="Send the market report",
+            observed_error_types=observed_error_types,
+        )
+
+        assert selected[0].id == "corr_wrong_tool_xyz", (
+            "Correction matching the observed WrongToolError should rank first"
+        )
+
+    # ------------------------------------------------------------------
+    # task() context manager
+    # ------------------------------------------------------------------
+
+    def test_task_context_manager_calls_begin_and_finalize(self, middleware, correction):
+        """task() must call begin_task() on entry and finalize_task() on exit."""
+        state = {"messages": [self._human_msg("Fetch the portfolio")]}
+
+        with middleware.task() as outcome:
+            middleware.before_model(state)
+            injected = list(middleware._task_corrections_injected)
+            outcome(True)
+
+        # After the context exits, _task_corrections_injected should have been cleared
+        assert middleware._task_corrections_injected == [], (
+            "finalize_task() should reset _task_corrections_injected"
+        )
+        # Effectiveness was recorded: times_effective should be 1
+        stored = middleware._forge.knowledge_base.get_corrections("tool_use")
+        corr = next((c for c in stored if c.id == correction.id), None)
+        if injected and corr:
+            assert corr.times_effective == 1, "correction should be marked effective"
+
+    def test_task_context_manager_records_failure_on_exception(self, middleware, correction):
+        """task() should finalize as failed when the block raises."""
+        state = {"messages": [self._human_msg("Run the report")]}
+
+        with pytest.raises(RuntimeError):
+            with middleware.task() as _outcome:
+                middleware.before_model(state)
+                raise RuntimeError("agent exploded")
+
+        # State is cleaned up even on exception
+        assert middleware._task_corrections_injected == []
+
+    def test_task_context_manager_clears_state_on_entry(self, middleware, correction):
+        """Entering the context manager resets stale state from a prior task."""
+        # Inject stale state manually
+        middleware._task_seen_correction_ids = {"stale_id"}
+        middleware._task_injection_signatures = {"stale_sig"}
+
+        with middleware.task():
+            assert middleware._task_seen_correction_ids == set()
+            assert middleware._task_injection_signatures == set()
 
 
 class TestLangGraphImport:

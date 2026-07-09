@@ -731,29 +731,44 @@ class LearningEngine:
                         logger.info(f"Generated rule: {rule.name} for {skill_name}")
 
                 # Always generate correction text for LangGraph-facing injection.
+                # Group failures by failing tool so each (error_type, tool)
+                # pair gets its own scoped correction — avoids cross-tool
+                # keyword contamination (e.g. git_commit keywords mixed with
+                # fetch_economic_data keywords in one correction).
                 type_errors = [e for e in errors if e.error_type == error_type]
                 type_failures = [
                     failure for failure in skill_failures
                     if failure.error_type == error_type
                 ]
-                correction = self.correction_generator.generate(
-                    skill_name=skill_name,
-                    error_type=error_type,
-                    errors=type_errors,
-                    failures=type_failures,
-                    llm_provider=llm_provider,
-                )
-                if correction:
-                    before_count = len(self.knowledge_base.get_corrections(skill_name))
-                    self.knowledge_base.add_correction(skill_name, correction)
-                    after_count = len(self.knowledge_base.get_corrections(skill_name))
-                    if after_count > before_count:
-                        metrics.corrections_generated += 1
-                        logger.info(
-                            "Generated correction for %s/%s",
-                            skill_name,
-                            error_type,
-                        )
+                # Partition by failing tool
+                failures_by_tool: Dict[str, List[Any]] = {}
+                for failure in type_failures:
+                    expected = getattr(failure, "expected", {}) or {}
+                    actual = getattr(failure, "actual", {}) or {}
+                    tool = expected.get("tool") or actual.get("tool") or "__unknown__"
+                    failures_by_tool.setdefault(tool, []).append(failure)
+                if not failures_by_tool:
+                    failures_by_tool["__no_failures__"] = []
+                for tool, tool_failures in failures_by_tool.items():
+                    correction = self.correction_generator.generate(
+                        skill_name=skill_name,
+                        error_type=error_type,
+                        errors=type_errors,
+                        failures=tool_failures if tool_failures else type_failures,
+                        llm_provider=llm_provider,
+                    )
+                    if correction:
+                        before_count = len(self.knowledge_base.get_corrections(skill_name))
+                        self.knowledge_base.add_correction(skill_name, correction)
+                        after_count = len(self.knowledge_base.get_corrections(skill_name))
+                        if after_count > before_count:
+                            metrics.corrections_generated += 1
+                            logger.info(
+                                "Generated correction for %s/%s tool=%s",
+                                skill_name,
+                                error_type,
+                                tool,
+                            )
 
             # Generate corrections from normalized failures even when the
             # corresponding legacy errors were not stored.
@@ -816,26 +831,37 @@ class LearningEngine:
                 if error_type in patterned_types:
                     continue
 
-                correction = self.correction_generator.generate(
-                    skill_name=skill_name,
-                    error_type=error_type,
-                    errors=[],
-                    failures=type_failures,
-                    llm_provider=llm_provider,
-                )
-                if not correction:
-                    continue
-
-                before_count = len(self.knowledge_base.get_corrections(skill_name))
-                self.knowledge_base.add_correction(skill_name, correction)
-                after_count = len(self.knowledge_base.get_corrections(skill_name))
-                if after_count > before_count:
-                    metrics.corrections_generated += 1
-                    logger.info(
-                        "Generated failure-backed correction for %s/%s",
-                        skill_name,
-                        error_type,
+                # Partition by failing tool (same as primary path above)
+                ft_by_tool: Dict[str, List[Any]] = {}
+                for failure in type_failures:
+                    expected = getattr(failure, "expected", {}) or {}
+                    actual = getattr(failure, "actual", {}) or {}
+                    tool = expected.get("tool") or actual.get("tool") or "__unknown__"
+                    ft_by_tool.setdefault(tool, []).append(failure)
+                if not ft_by_tool:
+                    ft_by_tool["__no_failures__"] = []
+                for tool, tool_ft in ft_by_tool.items():
+                    correction = self.correction_generator.generate(
+                        skill_name=skill_name,
+                        error_type=error_type,
+                        errors=[],
+                        failures=tool_ft if tool_ft else type_failures,
+                        llm_provider=llm_provider,
                     )
+                    if not correction:
+                        continue
+
+                    before_count = len(self.knowledge_base.get_corrections(skill_name))
+                    self.knowledge_base.add_correction(skill_name, correction)
+                    after_count = len(self.knowledge_base.get_corrections(skill_name))
+                    if after_count > before_count:
+                        metrics.corrections_generated += 1
+                        logger.info(
+                            "Generated failure-backed correction for %s/%s tool=%s",
+                            skill_name,
+                            error_type,
+                            tool,
+                        )
 
             # Collect unclassified errors for pattern suggestion
             for e in errors:

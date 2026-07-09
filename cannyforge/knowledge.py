@@ -536,9 +536,19 @@ class KnowledgeBase:
         """Return all skill names that have at least one correction."""
         return list(self.corrections_by_skill.keys())
 
-    def get_corrections(self, skill_name: str) -> List[Correction]:
-        """Get all corrections for a skill."""
-        return list(self.corrections_by_skill.get(skill_name, []))
+    def get_corrections(self, skill_name: str,
+                        apply_stability_gate: bool = False) -> List[Correction]:
+        """Get corrections for a skill.
+
+        When ``apply_stability_gate`` is True, corrections below the
+        effectiveness threshold (after enough observations) are excluded.
+        This is a rapid-reaction gate — the adapter's own ``stale_ineffective``
+        check handles long-term pruning with an additional age requirement.
+        """
+        corrections = list(self.corrections_by_skill.get(skill_name, []))
+        if apply_stability_gate:
+            corrections = [c for c in corrections if not c.should_skip]
+        return corrections
 
     def record_correction_injection(self, correction_id: str):
         """Record that a correction was injected into a prompt."""
@@ -547,10 +557,18 @@ class KnowledgeBase:
             correction.times_injected += 1
 
     def record_correction_outcome(self, correction_id: str, effective: bool):
-        """Record whether a correction appears effective for this execution."""
+        """Record whether a correction appears effective for this execution.
+
+        Tracks both positive (ECR) and negative (EIR) signals so the
+        stability gate and auto-pruning can act on real effectiveness data.
+        """
         correction = self.correction_index.get(correction_id)
-        if correction and effective:
+        if not correction:
+            return
+        if effective:
             correction.times_effective += 1
+        else:
+            correction.times_ineffective += 1
 
     def get_applicable_rules(self, skill_name: str, context: Dict[str, Any],
                             min_confidence: float = 0.3) -> List[Rule]:

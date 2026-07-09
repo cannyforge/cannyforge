@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -28,17 +29,76 @@ class Correction:
     created_at: float
     times_injected: int = 0
     times_effective: int = 0
+    times_ineffective: int = 0
     correction_type: str = ""  # e.g. "sequence", "retry", "hallucination", "tool_selection"
     trigger_keywords: List[str] = field(default_factory=list)
     trigger_task_families: List[str] = field(default_factory=list)
     trigger_transfer_clusters: List[str] = field(default_factory=list)
 
+    # Minimum observations before stability gate activates (aligned with
+    # adapter's MIN_INJECTIONS_FOR_DEPRECATION so probation and deprecation
+    # share the same observation floor).
+    _MIN_OBSERVATIONS: int = 5
+    # Effectiveness below this ratio → skip injection (rapid-reaction stability gate).
+    _SKIP_EFFECTIVENESS: float = 0.20
+    # Pruning thresholds (mirrors adapter's MIN_INJECTIONS_FOR_DEPRECATION + MIN_EFFECTIVENESS_TO_KEEP).
+    _PRUNE_MIN_OBSERVATIONS: int = 5
+    _PRUNE_EFFECTIVENESS: float = 0.30
+
+    @property
+    def _observed_total(self) -> int:
+        """Total observed outcomes, handling legacy data.
+
+        Legacy corrections only tracked ``times_injected`` and
+        ``times_effective`` — the implicit ineffective count is
+        ``times_injected - times_effective``.  When ``times_ineffective``
+        is still zero but ``times_injected > times_effective`` we know
+        ineffective outcomes happened but weren't recorded, so fall back
+        to ``times_injected`` as the denominator.
+        """
+        if self.times_ineffective == 0 and self.times_injected > self.times_effective:
+            return self.times_injected
+        return self.times_effective + self.times_ineffective
+
     @property
     def effectiveness(self) -> float:
-        """Fraction of injections that were effective. -1.0 if never injected."""
-        if self.times_injected == 0:
+        """Fraction of injections that were effective. -1.0 if never observed."""
+        total = self._observed_total
+        if total == 0:
             return -1.0
-        return self.times_effective / self.times_injected
+        return self.times_effective / total
+
+    @property
+    def eir(self) -> float:
+        """Error Injection Rate: fraction of injections where task still failed."""
+        total = self._observed_total
+        if total == 0:
+            return -1.0
+        return max(0, total - self.times_effective) / total
+
+    @property
+    def ecr(self) -> float:
+        """Error Correction Rate: fraction of injections where task succeeded."""
+        return self.effectiveness
+
+    @property
+    def should_skip(self) -> bool:
+        """Stability gate: skip injection when effectiveness is too low."""
+        if self._observed_total < self._MIN_OBSERVATIONS:
+            return False  # not enough data — let it fire
+        return self.effectiveness < self._SKIP_EFFECTIVENESS
+
+    @property
+    def should_prune(self) -> bool:
+        """Correction is consistently harmful — candidate for removal.
+
+        Higher bar than ``should_skip``: needs more observations and lower
+        effectiveness.  The adapter's ``stale_ineffective`` check adds an
+        additional age gate (30 days) on top of this.
+        """
+        if self._observed_total < self._PRUNE_MIN_OBSERVATIONS:
+            return False  # not enough data
+        return self.effectiveness < self._PRUNE_EFFECTIVENESS
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -50,6 +110,7 @@ class Correction:
             "created_at": self.created_at,
             "times_injected": self.times_injected,
             "times_effective": self.times_effective,
+            "times_ineffective": self.times_ineffective,
             "correction_type": self.correction_type,
             "trigger_keywords": list(self.trigger_keywords),
             "trigger_task_families": list(self.trigger_task_families),
@@ -67,6 +128,7 @@ class Correction:
             created_at=float(data.get("created_at", time())),
             times_injected=int(data.get("times_injected", 0)),
             times_effective=int(data.get("times_effective", 0)),
+            times_ineffective=int(data.get("times_ineffective", 0)),
             correction_type=data.get("correction_type", ""),
             trigger_keywords=list(data.get("trigger_keywords", [])),
             trigger_task_families=list(data.get("trigger_task_families", [])),
@@ -86,7 +148,9 @@ class Correction:
         if not self.trigger_keywords:
             return True
         task_tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", (task_description or "").lower()))
-        return any(keyword in task_tokens for keyword in self.trigger_keywords)
+        threshold = max(1, math.ceil(len(self.trigger_keywords) / 2))
+        matches = sum(1 for keyword in self.trigger_keywords if keyword in task_tokens)
+        return matches >= threshold
 
     def applies_to(self, task_description: str) -> bool:
         return self.applies_to_context({}, task_description)
@@ -164,6 +228,18 @@ class CorrectionGenerator:
     def _derive_trigger_keywords(self,
                                  errors: List[Any],
                                  failures: List[Any]) -> List[str]:
+        # For arg_format failures, trigger on tool-name tokens rather than task
+        # description tokens. Task surface words are too task-specific and cause
+        # the correction to fire on semantically unrelated tasks (coding_002 root cause).
+        if failures:
+            family = getattr(failures[0], "intervention_family", "") or ""
+            if not family:
+                failure_class = getattr(failures[0], "failure_class", "")
+                if failure_class:
+                    family = get_failure_definition(str(failure_class)).intervention_family
+            if family == "arg_format":
+                return self._derive_trigger_keywords_arg_format(failures)
+
         tasks = [getattr(err, "task_description", "") for err in errors if getattr(err, "task_description", "")]
         tasks.extend(
             getattr(failure, "task_description", "")
@@ -171,6 +247,58 @@ class CorrectionGenerator:
             if getattr(failure, "task_description", "")
         )
         return self._common_keywords(tasks, max_count=5)
+
+    def _derive_trigger_keywords_arg_format(self, failures: List[Any]) -> List[str]:
+        """Derive trigger keywords from tool name + task-relevant arg-value tokens.
+
+        Pure tool-name tokens (e.g. ['fetch','economic','data'] from
+        ``fetch_economic_data``) often don't appear in task text — the
+        majority-match gate kills the correction.  Including arg-value tokens
+        that overlap with the task text fixes this: for a failure where the
+        expected arg is ``LABOR_FORCE_2024_Q3_BLS`` and the task contains
+        'labor' and 'force', those tokens bridge the gap.
+
+        The tool-name tokens still provide scoping ('fetch' / 'economic' /
+        'data' won't fire on coding or MCP tasks), and the arg-value tokens
+        ensure at least 2 keywords match a data-domain task.
+        """
+        tool_tokens: List[str] = []
+        tool_seen: set = set()
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            actual = getattr(failure, "actual", {}) or {}
+            tool = expected.get("tool") or actual.get("tool") or ""
+            if tool:
+                for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", tool.lower()):
+                    if token not in tool_seen:
+                        tool_tokens.append(token)
+                        tool_seen.add(token)
+
+        # Collect expected arg values across failures, tokenize, and intersect
+        # with each failure's task text so only task-relevant tokens are kept.
+        arg_value_tokens: List[str] = []
+        arg_seen: set = set()
+        for failure in failures:
+            task_text = (getattr(failure, "task_description", "") or "").lower()
+            task_token_set = set(self._tokenize(task_text))
+            expected = getattr(failure, "expected", {}) or {}
+            expected_args = expected.get("args", {}) or {}
+            for arg_name, expected_val in expected_args.items():
+                val_str = str(expected_val).lower()
+                # Split on underscores first — series IDs like
+                # LABOR_FORCE_2024_Q3_BLS use _ as word separator.
+                for segment in val_str.split("_"):
+                    for token in re.findall(r"[a-zA-Z][a-zA-Z0-9]+", segment):
+                        if len(token) > 2 and token in task_token_set and token not in arg_seen:
+                            arg_value_tokens.append(token)
+                            arg_seen.add(token)
+
+        # Combine: tool tokens first (scoping), then task-overlapping arg tokens
+        keywords = tool_tokens[:4]
+        for token in arg_value_tokens:
+            if token not in tool_seen:
+                keywords.append(token)
+        return keywords[:6]
 
     def _derive_trigger_task_families(self,
                                       errors: List[Any],
@@ -288,6 +416,86 @@ class CorrectionGenerator:
                 return [str(tool_name) for tool_name in sequence if tool_name]
         return []
 
+    def _arg_format_template_from_failures(self, failures: List[Any]) -> Optional[str]:
+        """Build a specific arg_format correction from FailureRecord expected/actual data.
+
+        Generic template text ("validate parameters against the schema") is not actionable
+        because it names neither the tool nor the argument that failed. When FailureRecord
+        carries structured expected/actual dicts we can generate a concrete rule like
+        "when calling read_file, pass offset as an integer, not a string."
+        """
+        _PATTERN_HINTS: List[Tuple[str, str]] = [
+            # integer / numeric
+            (r"0-9", "an integer"),
+            # ISO date
+            (r"\\d\{4\}.*\\d\{2\}.*\\d\{2\}", "ISO 8601 date format (YYYY-MM-DD)"),
+            # conventional commits  e.g. ^(feat|fix|...)...
+            (r"\(feat\|fix", "Conventional Commits format, e.g. `feat(scope): description`"),
+            # uuid
+            (r"[0-9a-f]\{8\}.*[0-9a-f]\{4\}", "UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"),
+        ]
+
+        for failure in failures:
+            expected = getattr(failure, "expected", {}) or {}
+            actual = getattr(failure, "actual", {}) or {}
+            tool = expected.get("tool") or actual.get("tool") or ""
+            if not tool:
+                continue
+
+            expected_args = expected.get("args", {}) or {}
+            actual_args = actual.get("args", {}) or {}
+
+            # Find args that are in expected but missing from actual, or carry a
+            # regex-style constraint (starts with ^) indicating a format requirement,
+            # or are concrete expected values that differ from what the model passed.
+            failing_args: List[Tuple[str, str]] = []
+            for arg_name, expected_val in expected_args.items():
+                actual_val = actual_args.get(arg_name)
+                # Regex pattern (format constraint): always include.
+                if isinstance(expected_val, str) and expected_val.startswith("^"):
+                    failing_args.append((arg_name, str(expected_val)))
+                # Concrete value mismatch: model passed wrong (or no) value.
+                elif actual_val is None or str(actual_val) != str(expected_val):
+                    failing_args.append((arg_name, str(expected_val)))
+
+            if not failing_args:
+                continue
+
+            arg_name, expected_pattern = failing_args[0]
+
+            # Concrete value mismatch (not a regex pattern): tell the model the
+            # exact value to use.  e.g. "use series_id='LABOR_FORCE_2024_Q3_BLS'"
+            if not expected_pattern.startswith("^"):
+                return (
+                    f"When calling `{tool}`, pass `{arg_name}` as "
+                    f"`{arg_name}='{expected_pattern}'`. "
+                    f"Do not use a different or guessed value for `{arg_name}`."
+                )
+
+            # Derive a human-readable format description from the regex pattern.
+            type_desc = ""
+            for fragment, hint in _PATTERN_HINTS:
+                if re.search(fragment, expected_pattern):
+                    type_desc = hint
+                    break
+            if not type_desc:
+                if "0-9" in expected_pattern:
+                    type_desc = "an integer"
+                elif expected_pattern.startswith("^") and expected_pattern.endswith("$"):
+                    type_desc = f"the required format"
+
+            if type_desc:
+                return (
+                    f"When calling `{tool}`, pass `{arg_name}` as {type_desc}. "
+                    f"Do not pass `{arg_name}` in an unexpected format."
+                )
+            return (
+                f"When calling `{tool}`, ensure `{arg_name}` matches the required "
+                f"format before calling."
+            )
+
+        return None
+
     def _tokenize(self, text: str) -> List[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_]+", text.lower())
         return [t for t in tokens if len(t) > 2 and t not in self._STOPWORDS]
@@ -351,6 +559,9 @@ class CorrectionGenerator:
             )
 
         if family == "arg_format":
+            specific = self._arg_format_template_from_failures(failure_list)
+            if specific:
+                return specific
             return (
                 "Validate required parameters, types, and output shape against the tool schema before calling the tool."
             )
@@ -425,10 +636,19 @@ class CorrectionGenerator:
                     "evidence": getattr(failure, "evidence", {}),
                 })
 
+            correction_type = self._resolve_correction_type(error_type, failures)
+            type_specific_instruction = ""
+            if correction_type == "arg_format":
+                type_specific_instruction = (
+                    " Name the specific tool function and the argument that failed. "
+                    "Include the correct argument type (e.g. integer, not string). "
+                    "Do not write a generic schema-validation rule."
+                )
+
             prompt = (
                 "Given these repeated execution mistakes, write one concise correction rule "
                 "that prevents similar future failures on unseen tasks. Keep it imperative, "
-                "specific, and under 80 words. Return plain text only.\n\n"
+                f"specific, and under 80 words.{type_specific_instruction} Return plain text only.\n\n"
                 f"Skill: {skill_name}\n"
                 f"Error type: {error_type}\n"
                 f"Error examples: {json.dumps(examples, ensure_ascii=False)}\n"

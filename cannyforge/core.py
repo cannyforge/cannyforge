@@ -410,8 +410,17 @@ class CannyForge:
             if skill_md.exists():
                 bundle.write(skill_md, "SKILL.md")
 
-    def import_skill(self, bundle_path: str, confidence_discount: float = 0.5) -> int:
-        """Import corrections from a .cannyforge bundle into the local knowledge base."""
+    def import_skill(self, bundle_path: str, confidence_discount: float = 0.5,
+                      skill_name_override: Optional[str] = None) -> int:
+        """Import corrections from a .cannyforge bundle into the local knowledge base.
+
+        Args:
+            bundle_path: Path to the .cannyforge bundle file.
+            confidence_discount: Unused (reserved for future discount factor).
+            skill_name_override: If provided, store all corrections under this
+                skill name instead of the one recorded in the bundle. Useful when
+                the bundle was exported from a differently-named skill.
+        """
         import json
         import zipfile
 
@@ -432,7 +441,8 @@ class CannyForge:
                 correction = Correction.from_dict(correction_data)
                 correction.times_injected = 0
                 correction.times_effective = 0
-                self.knowledge_base.add_correction(correction.skill_name, correction)
+                target_skill = skill_name_override or correction.skill_name
+                self.knowledge_base.add_correction(target_skill, correction)
                 imported += 1
 
         self.knowledge_base.save_corrections()
@@ -443,24 +453,48 @@ class CannyForge:
         learning_stats = self.learning_engine.get_statistics()
         kb_stats = self.knowledge_base.get_statistics()
 
+        # When in-memory counters are fresh (new process), derive from the
+        # repositories that already loaded their records from disk on init.
+        if self.tasks_executed == 0:
+            tasks_succeeded = learning_stats['total_successes']
+            tasks_failed = learning_stats['total_errors']
+            tasks_executed = tasks_succeeded + tasks_failed
+
+            successes = self.learning_engine.success_repo.successes
+            errors = self.learning_engine.error_repo.errors
+            skill_stats = {}
+            for name in self.skill_registry.list_skills():
+                s = sum(1 for r in successes if r.skill_name == name)
+                f = sum(1 for r in errors if r.skill_name == name)
+                total = s + f
+                skill_stats[name] = {
+                    'executions': total,
+                    'success_rate': s / total if total > 0 else 0,
+                }
+        else:
+            tasks_executed = self.tasks_executed
+            tasks_succeeded = self.tasks_succeeded
+            tasks_failed = self.tasks_failed
+            skill_stats = {
+                name: {
+                    'executions': skill.executions,
+                    'success_rate': skill.success_rate,
+                }
+                for name, skill in self.skill_registry.skills.items()
+            }
+
         return {
             'execution': {
-                'tasks_executed': self.tasks_executed,
-                'tasks_succeeded': self.tasks_succeeded,
-                'tasks_failed': self.tasks_failed,
-                'success_rate': self.tasks_succeeded / self.tasks_executed if self.tasks_executed > 0 else 0,
+                'tasks_executed': tasks_executed,
+                'tasks_succeeded': tasks_succeeded,
+                'tasks_failed': tasks_failed,
+                'success_rate': tasks_succeeded / tasks_executed if tasks_executed > 0 else 0,
             },
             'learning': learning_stats,
             'knowledge': kb_stats,
             'skills': {
                 'available': self.skill_registry.list_skills(),
-                'skill_stats': {
-                    name: {
-                        'executions': skill.executions,
-                        'success_rate': skill.success_rate,
-                    }
-                    for name, skill in self.skill_registry.skills.items()
-                }
+                'skill_stats': skill_stats,
             }
         }
 
