@@ -45,7 +45,7 @@ harmful are flagged for pruning.
 arg-format corrections now derive trigger keywords from both the failing
 tool name AND the expected arg value, with task-text overlap filtering.
 This fixes the "correction exists but never fires" problem — injection
-rate improved from 6.7% to 31.2% in canonical runs.
+rate improved from 6.7% to 27% in canonical runs.
 
 ## Canonical benchmark results (deepseek-v4-flash, passk=3)
 
