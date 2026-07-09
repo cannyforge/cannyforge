@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 
+from cannyforge.corrections import Correction
+
 logger = logging.getLogger("Knowledge")
 
 
@@ -66,6 +68,8 @@ class Condition:
             return False
 
         elif self.operator == ConditionOperator.NOT_CONTAINS:
+            if not self.value:  # empty string is always contained
+                return False
             if isinstance(field_value, str):
                 return self.value.lower() not in field_value.lower()
             elif isinstance(field_value, (list, set)):
@@ -146,10 +150,11 @@ class Action:
                 self._set_field_value(result, self.target, current)
 
         elif self.action_type == "flag":
-            flags = result.get('_flags', set())
-            if isinstance(flags, list):
-                flags = set(flags)
-            flags.add(self.value)
+            flags = result.get('_flags', [])
+            if isinstance(flags, set):
+                flags = list(flags)
+            if self.value not in flags:
+                flags.append(self.value)
             result['_flags'] = flags
 
         elif self.action_type == "transform":
@@ -379,10 +384,14 @@ class KnowledgeBase:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.rules_file = self.data_dir / "rules.json"
+        self.corrections_file = self.data_dir / "corrections.json"
         self.rules_by_skill: Dict[str, List[Rule]] = defaultdict(list)
+        self.corrections_by_skill: Dict[str, List[Correction]] = defaultdict(list)
         self.rule_index: Dict[str, Rule] = {}  # id -> Rule
+        self.correction_index: Dict[str, Correction] = {}  # id -> Correction
 
         self._load_rules()
+        self._load_corrections()
 
     def _load_rules(self):
         """Load rules from storage"""
@@ -408,6 +417,34 @@ class KnowledgeBase:
             logger.debug(f"Saved {len(self.rule_index)} rules to storage")
         except Exception as e:
             logger.error(f"Error saving rules: {e}")
+
+    def _load_corrections(self):
+        """Load corrections from storage."""
+        if self.corrections_file.exists():
+            try:
+                data = json.loads(self.corrections_file.read_text())
+                for skill_name, corrections_data in data.items():
+                    for correction_data in corrections_data:
+                        correction = Correction.from_dict(correction_data)
+                        self.corrections_by_skill[skill_name].append(correction)
+                        self.correction_index[correction.id] = correction
+                logger.info(
+                    "Loaded %d corrections from storage",
+                    len(self.correction_index),
+                )
+            except Exception as e:
+                logger.error(f"Error loading corrections: {e}")
+
+    def save_corrections(self):
+        """Persist corrections to storage."""
+        try:
+            data = {}
+            for skill_name, corrections in self.corrections_by_skill.items():
+                data[skill_name] = [correction.to_dict() for correction in corrections]
+            self.corrections_file.write_text(json.dumps(data, indent=2))
+            logger.debug("Saved %d corrections to storage", len(self.correction_index))
+        except Exception as e:
+            logger.error(f"Error saving corrections: {e}")
 
     def add_rule(self, skill_name: str, rule: Rule):
         """Add a new rule for a skill.
@@ -454,6 +491,84 @@ class KnowledgeBase:
         """Get all rules for a skill above confidence threshold"""
         rules = self.rules_by_skill.get(skill_name, [])
         return [r for r in rules if r.confidence >= min_confidence]
+
+    def add_correction(self, skill_name: str, correction: Correction):
+        """Add or merge a correction for a skill."""
+        existing_by_id = self.correction_index.get(correction.id)
+        if existing_by_id:
+            existing_by_id.content = correction.content
+            existing_by_id.source_errors = sorted(
+                set(existing_by_id.source_errors + correction.source_errors)
+            )
+            existing_by_id.trigger_keywords = sorted(
+                set(existing_by_id.trigger_keywords + correction.trigger_keywords)
+            )
+            existing_by_id.trigger_task_families = sorted(
+                set(existing_by_id.trigger_task_families + correction.trigger_task_families)
+            )
+            existing_by_id.trigger_transfer_clusters = sorted(
+                set(existing_by_id.trigger_transfer_clusters + correction.trigger_transfer_clusters)
+            )
+            return
+
+        for existing in self.corrections_by_skill[skill_name]:
+            if (existing.error_type == correction.error_type
+                    and existing.content.strip() == correction.content.strip()):
+                existing.source_errors = sorted(
+                    set(existing.source_errors + correction.source_errors)
+                )
+                existing.trigger_keywords = sorted(
+                    set(existing.trigger_keywords + correction.trigger_keywords)
+                )
+                existing.trigger_task_families = sorted(
+                    set(existing.trigger_task_families + correction.trigger_task_families)
+                )
+                existing.trigger_transfer_clusters = sorted(
+                    set(existing.trigger_transfer_clusters + correction.trigger_transfer_clusters)
+                )
+                return
+
+        self.corrections_by_skill[skill_name].append(correction)
+        self.correction_index[correction.id] = correction
+        logger.info("Added correction '%s' for skill '%s'", correction.id, skill_name)
+
+    def list_skills(self) -> List[str]:
+        """Return all skill names that have at least one correction."""
+        return list(self.corrections_by_skill.keys())
+
+    def get_corrections(self, skill_name: str,
+                        apply_stability_gate: bool = False) -> List[Correction]:
+        """Get corrections for a skill.
+
+        When ``apply_stability_gate`` is True, corrections below the
+        effectiveness threshold (after enough observations) are excluded.
+        This is a rapid-reaction gate — the adapter's own ``stale_ineffective``
+        check handles long-term pruning with an additional age requirement.
+        """
+        corrections = list(self.corrections_by_skill.get(skill_name, []))
+        if apply_stability_gate:
+            corrections = [c for c in corrections if not c.should_skip]
+        return corrections
+
+    def record_correction_injection(self, correction_id: str):
+        """Record that a correction was injected into a prompt."""
+        correction = self.correction_index.get(correction_id)
+        if correction:
+            correction.times_injected += 1
+
+    def record_correction_outcome(self, correction_id: str, effective: bool):
+        """Record whether a correction appears effective for this execution.
+
+        Tracks both positive (ECR) and negative (EIR) signals so the
+        stability gate and auto-pruning can act on real effectiveness data.
+        """
+        correction = self.correction_index.get(correction_id)
+        if not correction:
+            return
+        if effective:
+            correction.times_effective += 1
+        else:
+            correction.times_ineffective += 1
 
     def get_applicable_rules(self, skill_name: str, context: Dict[str, Any],
                             min_confidence: float = 0.3) -> List[Rule]:
@@ -574,11 +689,16 @@ class KnowledgeBase:
 
         return {
             'total_rules': total_rules,
+            'total_corrections': len(self.correction_index),
             'total_applications': total_applications,
             'total_successes': total_successes,
             'success_rate': total_successes / total_applications if total_applications > 0 else 0,
             'average_confidence': avg_confidence,
             'rules_by_skill': by_skill,
+            'corrections_by_skill': {
+                skill: len(corrections)
+                for skill, corrections in self.corrections_by_skill.items()
+            },
             'rules_by_status': by_status,
         }
 
@@ -688,10 +808,245 @@ class RuleGenerator:
             ],
             'description': 'Warn about low credibility sources'
         },
+        # ── Tool Use Accuracy patterns ──────────────────────────────
+        'WrongToolError': {
+            'detection': [
+                Condition('context.tool_match_confidence', ConditionOperator.LESS_THAN, 0.6),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'wrong_tool_risk'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously selected the wrong tool for tasks like this. '
+                       'Re-read the user\'s request carefully. Match the primary action verb to '
+                       'the correct tool before proceeding.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'STOP: The wrong tool was just used. Re-read the task and select the tool '
+                       'whose description best matches the primary action verb.'),
+            ],
+            'description': 'Flag when agent selects a tool that does not match task intent'
+        },
+        'MissingParamError': {
+            'detection': [
+                Condition('context.has_required_params', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'missing_param'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously omitted required parameters for this type of tool call. '
+                       'Check every required parameter in the tool schema before calling. '
+                       'If a value is not explicitly stated, infer it from context or ask the user.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because a required parameter was missing. '
+                       'Re-read the tool schema and supply all required parameters.'),
+            ],
+            'description': 'Detect when a required tool parameter is omitted'
+        },
+        'WrongParamTypeError': {
+            'detection': [
+                Condition('context.has_type_mismatch', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'param_type_mismatch'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously passed parameters with the wrong type. '
+                       'Check the tool schema for expected types (string, int, float, bool) '
+                       'and convert your values before calling.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because a parameter had the wrong type. '
+                       'Check the schema and convert the value to the expected type.'),
+            ],
+            'description': 'Flag when a tool parameter has the wrong type (e.g. string instead of int)'
+        },
+        'ExtraParamError': {
+            'detection': [
+                Condition('context.has_extra_params', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'extra_params'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously included extra parameters not in the tool schema. '
+                       'Only pass parameters listed in the tool definition. Remove any additional fields.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because extra parameters were included. '
+                       'Only use parameters defined in the tool schema.'),
+            ],
+            'description': 'Strip unnecessary parameters that confuse tool execution'
+        },
+        'AmbiguityError': {
+            'detection': [
+                Condition('task.description', ConditionOperator.MATCHES,
+                         r'\b(find|look up|check|get)\b'),
+                Condition('context.tool_match_confidence', ConditionOperator.LESS_THAN, 0.5),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'ambiguous_request'),
+                Action('append', 'context.suggestions',
+                       'WARNING: This request is ambiguous and could map to multiple tools. '
+                       'Before selecting a tool, identify the specific action the user wants '
+                       '(e.g., "find" could mean search_web, read_file, or run_command). '
+                       'Choose the tool whose description most precisely matches the intent.'),
+            ],
+            'recovery': [
+                Action('append', 'context.suggestions',
+                       'The ambiguous request led to the wrong tool. '
+                       'Re-read the request and pick the tool that matches the specific action needed.'),
+            ],
+            'description': 'Flag ambiguous requests that could map to multiple tools'
+        },
+        'FormatError': {
+            'detection': [
+                Condition('context.output_schema_valid', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'format_mismatch'),
+                Action('append', 'context.warnings',
+                       'STOP: Previous tool calls returned output that did not match the expected schema. '
+                       'Validate your output format against the schema before returning results.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool output did not match the expected schema. '
+                       'Re-format the output to match the required structure.'),
+            ],
+            'description': 'Enforce output schema validation on tool results'
+        },
+        'ContextMissError': {
+            'detection': [
+                Condition('context.requires_prior_context', ConditionOperator.EQUALS, True),
+                Condition('context.has_prior_context', ConditionOperator.EQUALS, False),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'context_missing'),
+                Action('append', 'context.warnings',
+                       'STOP: This is a multi-step task that requires context from previous steps. '
+                       'Before calling any tool, check if you need data from a prior step '
+                       '(e.g., file contents, search results). Retrieve that data first.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because prior step context was not carried forward. '
+                       'Go back and retrieve the required context before retrying.'),
+            ],
+            'description': 'Detect multi-step patterns where prior context is needed but missing'
+        },
+        # ── Trace-level anti-pattern patterns ───────────────────────
+        'SequenceViolationError': {
+            'detection': [
+                Condition('context.sequence_violation_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'sequence_violation'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously called tools out of order. '
+                       'Read before editing. Validate before acting. '
+                       'Check that prerequisite tools have already run before calling any tool that depends on their output.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Tool call failed because a required prior step was skipped. '
+                       'Go back and complete the prerequisite step before retrying.'),
+            ],
+            'description': 'Flag when a tool is called before its required prerequisite'
+        },
+        'RetryLoopError': {
+            'detection': [
+                Condition('context.retry_loop_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'retry_loop'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously retried the same failing call without changes. '
+                       'If a tool call fails, do not repeat it identically. '
+                       'Change the arguments, try a different tool, or ask the user for clarification.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Identical retry detected after failure. '
+                       'Change your approach: modify the arguments or select a different tool.'),
+            ],
+            'description': 'Detect when the same tool+args is retried after an error without modification'
+        },
+        'HallucinatedToolError': {
+            'detection': [
+                Condition('context.hallucinated_tool_detected', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'hallucinated_tool'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously called tools that do not exist. '
+                       'Only call tools listed in the provided tool definitions. '
+                       'Do not invent tool names. If no available tool fits, say so.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'A non-existent tool was called. '
+                       'Review the available tool list and select only tools that are defined.'),
+            ],
+            'description': 'Detect when the agent calls a tool not in the available tool set'
+        },
+        'PrematureExitError': {
+            'detection': [
+                Condition('context.requires_prior_context', ConditionOperator.EQUALS, True),
+            ],
+            'remediation': [
+                Action('flag', '_flags', 'premature_exit_risk'),
+                Action('append', 'context.warnings',
+                       'STOP: You have previously stopped before completing all required steps. '
+                       'This task requires multiple tool calls in sequence. '
+                       'Do not give a final answer until every required step has been executed.'),
+            ],
+            'recovery': [
+                Action('append', 'context.warnings',
+                       'Task ended early without completing all required tool calls. '
+                       'Continue calling the remaining tools until the full task is resolved.'),
+            ],
+            'description': 'Detect when the agent stops before completing all required tool calls'
+        },
     }
+
+    _custom_patterns: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self):
         self._rule_counter = 0
+
+    @classmethod
+    def register_pattern(cls, error_type: str, pattern: Dict[str, Any]):
+        """Register a new pattern at runtime.
+
+        Args:
+            error_type: Name of the error type (e.g., "MyCustomError")
+            pattern: Dict with required keys: 'detection', 'remediation', 'description'.
+                     Optional: 'recovery'. Values can be Condition/Action objects
+                     or raw dicts (which will be converted on use).
+
+        Raises:
+            ValueError: If required keys are missing.
+        """
+        required_keys = {'detection', 'remediation', 'description'}
+        missing = required_keys - set(pattern.keys())
+        if missing:
+            raise ValueError(f"Pattern missing required keys: {missing}")
+
+        # Convert raw dicts to Condition/Action objects if needed
+        converted = dict(pattern)
+        if converted['detection'] and isinstance(converted['detection'][0], dict):
+            converted['detection'] = [Condition.from_dict(c) for c in converted['detection']]
+        if converted['remediation'] and isinstance(converted['remediation'][0], dict):
+            converted['remediation'] = [Action.from_dict(a) for a in converted['remediation']]
+        if 'recovery' in converted and converted['recovery'] and isinstance(converted['recovery'][0], dict):
+            converted['recovery'] = [Action.from_dict(a) for a in converted['recovery']]
+
+        cls.PATTERN_LIBRARY[error_type] = converted
+        cls._custom_patterns[error_type] = converted
+        logger.info(f"Registered custom pattern: {error_type}")
 
     def _generate_rule_id(self, error_type: str) -> str:
         """Generate unique rule ID"""
@@ -826,17 +1181,29 @@ Use standard Action types: add_field, flag, append, reject"""
         try:
             # Use the LLM to generate the pattern
             from cannyforge.llm import LLMRequest
+
             request = LLMRequest(
-                task_description=f"Suggest pattern for {error_type}",
-                skill_name="",
-                skill_description="Pattern generation",
-                context={},
+                task_description=prompt,
+                skill_name="pattern_generator",
+                skill_description="Suggest PATTERN_LIBRARY entries from repeated runtime failures",
+                context={"error_type": error_type, "examples": examples[:5]},
+                system_prompt=(
+                    "You analyze repeated runtime failures and return a single valid JSON object. "
+                    "Do not wrap the response in markdown fences or prose."
+                ),
             )
             response = llm_provider.generate(request)
 
-            # Parse the response (assuming it's JSON in the content)
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', response.content or "")
+            raw_text = response.raw_response if isinstance(response.raw_response, str) else ""
+            if not raw_text:
+                if isinstance(response.content, str):
+                    raw_text = response.content
+                elif isinstance(response.content, dict):
+                    raw_text = json.dumps(response.content)
+                else:
+                    raw_text = str(response.content or "")
+
+            json_match = re.search(r'\{[\s\S]*\}', raw_text)
             if json_match:
                 pattern = json.loads(json_match.group())
                 logger.info(f"Suggested pattern for {error_type}: {pattern.get('description')}")

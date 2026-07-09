@@ -239,7 +239,7 @@ class _OpenAICompatibleProvider(LLMProvider):
         return bool(self._api_key)
 
     def _build_system_prompt(self, request: LLMRequest) -> str:
-        return (
+        prompt = (
             f"You are the '{request.skill_name}' skill. "
             f"Description: {request.skill_description}\n\n"
             f"Available templates: {json.dumps(list(request.templates.keys()))}\n"
@@ -250,6 +250,18 @@ class _OpenAICompatibleProvider(LLMProvider):
             '(e.g. "subject", "body" for emails)\n'
             '- "reasoning": brief explanation of your choices\n'
         )
+
+        # Surface CannyForge warnings prominently
+        warnings = request.context.get("warnings", [])
+        suggestions = request.context.get("suggestions", [])
+        if warnings or suggestions:
+            prompt += "\nIMPORTANT - Learned rules from previous errors:\n"
+            for w in warnings:
+                prompt += f"- {w}\n"
+            for s in suggestions:
+                prompt += f"- {s}\n"
+
+        return prompt
 
     def classify_intent(self, request: LLMRequest) -> str:
         client = self._get_client()
@@ -419,7 +431,7 @@ class ClaudeProvider(LLMProvider):
         return bool(self._api_key)
 
     def _build_system_prompt(self, request: LLMRequest) -> str:
-        return (
+        prompt = (
             f"You are the '{request.skill_name}' skill. "
             f"Description: {request.skill_description}\n\n"
             f"Available templates: {json.dumps(list(request.templates.keys()))}\n"
@@ -430,6 +442,18 @@ class ClaudeProvider(LLMProvider):
             '(e.g. "subject", "body" for emails)\n'
             '- "reasoning": brief explanation of your choices\n'
         )
+
+        # Surface CannyForge warnings prominently
+        warnings = request.context.get("warnings", [])
+        suggestions = request.context.get("suggestions", [])
+        if warnings or suggestions:
+            prompt += "\nIMPORTANT - Learned rules from previous errors:\n"
+            for w in warnings:
+                prompt += f"- {w}\n"
+            for s in suggestions:
+                prompt += f"- {s}\n"
+
+        return prompt
 
     def classify_intent(self, request: LLMRequest) -> str:
         client = self._get_client()

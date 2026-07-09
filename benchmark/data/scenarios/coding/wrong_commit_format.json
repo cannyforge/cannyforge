@@ -1,0 +1,45 @@
+{
+  "id": "coding_002",
+  "domain": "coding",
+  "title": "Git commit violating Conventional Commits format",
+  "difficulty": "medium",
+  "failure_modes": ["arg_mangling"],
+  "setup": {
+    "files": {
+      "/workspace/auth.py": "import hashlib\n\ndef hash_password(password: str) -> str:\n    \"\"\"One-way hash using SHA-256.\"\"\"\n    return hashlib.sha256(password.encode()).hexdigest()\n\ndef verify_password(password: str, hashed: str) -> bool:\n    return hash_password(password) == hashed\n"
+    }
+  },
+  "user_message": "The auth.py changes are already staged. Commit them with an appropriate message.",
+  "tools": ["read_file", "edit_file", "glob", "grep", "run_test", "git_commit"],
+  "expected_trace": {
+    "calls": [
+      {
+        "tool": "git_commit",
+        "args_contain": {
+          "message": "^(feat|fix|docs|style|refactor|test|chore)(\\([a-z_]+\\))?: .{5,}"
+        },
+        "optional": false
+      }
+    ],
+    "ordering": "partial",
+    "max_calls": 3
+  },
+  "anti_patterns": [],
+  "error_injections": [
+    {
+      "condition": {
+        "tool": "git_commit",
+        "arg_format_mismatch": {
+          "message": "^(feat|fix|docs|style|refactor|test|chore)(\\([a-z_]+\\))?: .{5,}"
+        }
+      },
+      "response": {
+        "status": "error",
+        "message": "pre-commit hook rejected: commit message must follow Conventional Commits. Required format: type(scope): description — where type is one of feat|fix|docs|style|refactor|test|chore, scope is the module name in parentheses, description is at least 5 chars. Example: 'feat(auth): add SHA-256 password hashing'"
+      }
+    }
+  ],
+  "success_condition": {
+    "type": "expected_trace_match"
+  }
+}

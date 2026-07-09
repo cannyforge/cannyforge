@@ -6,6 +6,8 @@ Pattern detection that generates actionable rules with proper validation
 
 import logging
 import json
+import math
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
@@ -13,7 +15,9 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 import random
 
+from cannyforge.failures import FailureRecord
 from cannyforge.knowledge import KnowledgeBase, Rule, RuleGenerator, RuleType, RuleStatus
+from cannyforge.corrections import CorrectionGenerator
 
 logger = logging.getLogger("Learning")
 
@@ -28,9 +32,11 @@ class ErrorRecord:
     error_message: str
     context_snapshot: Dict[str, Any] = field(default_factory=dict)
     rules_applied: List[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: f"err_{uuid.uuid4().hex}")
 
     def to_dict(self) -> Dict:
         return {
+            'id': self.id,
             'timestamp': self.timestamp.isoformat(),
             'skill': self.skill_name,
             'task': self.task_description,
@@ -43,6 +49,7 @@ class ErrorRecord:
     @classmethod
     def from_dict(cls, data: Dict) -> 'ErrorRecord':
         return cls(
+            id=data.get('id', f"err_{uuid.uuid4().hex}"),
             timestamp=datetime.fromisoformat(data['timestamp']),
             skill_name=data['skill'],
             task_description=data['task'],
@@ -80,6 +87,7 @@ class LearningMetrics:
     errors_analyzed: int = 0
     patterns_detected: int = 0
     rules_generated: int = 0
+    corrections_generated: int = 0
     rules_applied_total: int = 0
     rule_success_rate: float = 0.0
 
@@ -88,6 +96,7 @@ class LearningMetrics:
             'errors_analyzed': self.errors_analyzed,
             'patterns_detected': self.patterns_detected,
             'rules_generated': self.rules_generated,
+            'corrections_generated': self.corrections_generated,
             'rules_applied_total': self.rules_applied_total,
             'rule_success_rate': self.rule_success_rate,
         }
@@ -155,6 +164,74 @@ class ErrorRepository:
             self._backend.clear_errors()
         elif self.errors_file.exists():
             self.errors_file.unlink()
+
+
+class FailureRepository:
+    """Repository for normalized failure records.
+
+    Uses dedicated backend methods when available. If the backend predates
+    FailureRecord support, falls back to local JSONL persistence so callers do
+    not need an all-or-nothing storage migration.
+    """
+
+    def __init__(self, data_dir: Path, storage_backend=None):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._backend = storage_backend
+        self.failures_file = self.data_dir / "failures.jsonl"
+        self.failures: List[FailureRecord] = []
+        self._load()
+
+    def _load(self):
+        if self._backend is not None and hasattr(self._backend, "get_failures"):
+            try:
+                for data in self._backend.get_failures():
+                    self.failures.append(FailureRecord.from_dict(data))
+                return
+            except Exception as e:
+                logger.error(f"Error loading failures from backend: {e}")
+
+        if self.failures_file.exists():
+            try:
+                with open(self.failures_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            self.failures.append(FailureRecord.from_dict(json.loads(line)))
+            except Exception as e:
+                logger.error(f"Error loading failures: {e}")
+
+    def record(self, failure: FailureRecord):
+        self.failures.append(failure)
+        if self._backend is not None and hasattr(self._backend, "store_failure"):
+            try:
+                self._backend.store_failure(failure.to_dict())
+                return
+            except Exception as e:
+                logger.error(f"Error writing failure via backend: {e}")
+
+        try:
+            with open(self.failures_file, 'a') as f:
+                f.write(json.dumps(failure.to_dict()) + '\n')
+        except Exception as e:
+            logger.error(f"Error writing failure record: {e}")
+
+    def get_by_skill(self, skill_name: str) -> List[FailureRecord]:
+        return [f for f in self.failures if f.skill_name == skill_name]
+
+    def get_by_class(self, failure_class: str) -> List[FailureRecord]:
+        return [f for f in self.failures if f.failure_class == failure_class]
+
+    def clear(self):
+        self.failures = []
+        if self._backend is not None and hasattr(self._backend, "clear_failures"):
+            try:
+                self._backend.clear_failures()
+                return
+            except Exception as e:
+                logger.error(f"Error clearing failures via backend: {e}")
+
+        if self.failures_file.exists():
+            self.failures_file.unlink()
 
 
 @dataclass
@@ -331,6 +408,24 @@ class SuccessRepository:
             self.successes_file.unlink()
 
 
+def _binomial_test(k: int, n: int, p: float) -> float:
+    """One-sided binomial test: P(X >= k) under Binomial(n, p).
+
+    Pure Python implementation using math.comb (no scipy needed).
+    Returns a p-value. Small p-value means the observed frequency k
+    is significantly higher than expected by chance at rate p.
+    """
+    if n <= 0 or p <= 0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+
+    p_value = 0.0
+    for i in range(k, n + 1):
+        p_value += math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i))
+    return min(p_value, 1.0)
+
+
 class PatternDetector:
     """
     Detects patterns in errors and suggests actionable rules
@@ -343,12 +438,12 @@ class PatternDetector:
 
     def detect_patterns(self, errors: List[ErrorRecord]) -> List[Tuple[str, float, int, Dict]]:
         """
-        Detect error patterns with context analysis.
+        Detect error patterns with context analysis and statistical significance.
 
-        Uses per-type frequency threshold only (min_frequency). The old
-        confidence gate (frequency / total_errors >= min_confidence) was
-        biased against minority error types when many error types co-exist.
-        If an error happens min_frequency+ times, it deserves a rule.
+        Filters:
+        1. Frequency >= min_frequency
+        2. Confidence >= 0.1 (error type is at least 10% of skill errors)
+        3. Binomial test p-value <= 0.05 (statistically significant)
 
         Returns:
             List of (error_type, confidence, frequency, context_features)
@@ -363,20 +458,40 @@ class PatternDetector:
 
         patterns = []
         total_errors = len(errors)
+        num_types = max(len(by_type), 1)
 
         for error_type, type_errors in by_type.items():
             frequency = len(type_errors)
 
-            if frequency >= self.min_frequency:
-                # Confidence scoped per-skill: use frequency relative to
-                # errors of the same skill, not all errors globally.
-                skill_errors = [e for e in errors if e.skill_name == type_errors[0].skill_name]
-                denominator = len(skill_errors) if skill_errors else total_errors
-                confidence = frequency / denominator
+            if frequency < self.min_frequency:
+                continue
 
-                # Extract common context features
-                context_features = self._extract_common_features(type_errors)
-                patterns.append((error_type, confidence, frequency, context_features))
+            # Confidence scoped per-skill: use frequency relative to
+            # errors of the same skill, not all errors globally.
+            skill_errors = [e for e in errors if e.skill_name == type_errors[0].skill_name]
+            denominator = len(skill_errors) if skill_errors else total_errors
+            confidence = frequency / denominator
+
+            # Minimum confidence floor: must be at least 10% of skill errors
+            if confidence < 0.1:
+                continue
+
+            # Statistical significance: is this error type occurring
+            # more than expected by chance? Only test when there are
+            # multiple error types to compare against.
+            if num_types > 1:
+                expected_rate = 1.0 / num_types
+                p_value = _binomial_test(frequency, total_errors, expected_rate)
+                if p_value > 0.05:
+                    logger.debug(
+                        "Skipping %s: not statistically significant (p=%.3f)",
+                        error_type, p_value,
+                    )
+                    continue
+
+            # Extract common context features
+            context_features = self._extract_common_features(type_errors)
+            patterns.append((error_type, confidence, frequency, context_features))
 
         # Sort by frequency
         patterns.sort(key=lambda x: x[2], reverse=True)
@@ -436,10 +551,12 @@ class LearningEngine:
         self.data_dir = Path(data_dir)
 
         self.error_repo = ErrorRepository(data_dir, storage_backend=storage_backend)
+        self.failure_repo = FailureRepository(data_dir, storage_backend=storage_backend)
         self.step_error_repo = StepErrorRepository(data_dir, storage_backend=storage_backend)
         self.success_repo = SuccessRepository(data_dir, storage_backend=storage_backend)
         self.pattern_detector = PatternDetector()
         self.rule_generator = RuleGenerator()
+        self.correction_generator = CorrectionGenerator()
 
         self.learning_cycles = 0
         self.total_rules_generated = 0
@@ -463,6 +580,37 @@ class LearningEngine:
         )
         self.error_repo.record(record)
         logger.debug(f"Recorded error: {error_type} for {skill_name}")
+
+    def record_failure(self,
+                       skill_name: str,
+                       task_description: str,
+                       failure_class: str,
+                       phase: str,
+                       severity: str = "medium",
+                       expected: Optional[Dict[str, Any]] = None,
+                       actual: Optional[Dict[str, Any]] = None,
+                       evidence: Optional[Dict[str, Any]] = None,
+                       trace_context: Optional[Dict[str, Any]] = None,
+                       scenario_id: str = "",
+                       legacy_error_type: Optional[str] = None) -> FailureRecord:
+        """Record a normalized failure fact without forcing downstream migrations."""
+        record = FailureRecord(
+            timestamp=datetime.now(),
+            skill_name=skill_name,
+            task_description=task_description,
+            failure_class=failure_class,
+            phase=phase,
+            severity=severity,
+            expected=expected or {},
+            actual=actual or {},
+            evidence=evidence or {},
+            trace_context=trace_context or {},
+            scenario_id=scenario_id,
+            legacy_error_type=legacy_error_type,
+        )
+        self.failure_repo.record(record)
+        logger.debug(f"Recorded failure: {failure_class} for {skill_name}")
+        return record
 
     def record_success(self,
                       skill_name: str,
@@ -509,9 +657,13 @@ class LearningEngine:
 
     def run_learning_cycle(self,
                           min_frequency: int = 3,
-                          min_confidence: float = 0.5) -> LearningMetrics:
+                          min_confidence: float = 0.5,
+                          llm_provider=None) -> LearningMetrics:
         """
-        Run a learning cycle: detect patterns and generate rules
+        Run a learning cycle: detect patterns and generate rules.
+
+        If llm_provider is given and there are unclassified/GenericError
+        errors (>= 5), suggest_pattern() is called to propose new patterns.
 
         Returns:
             LearningMetrics with cycle results
@@ -526,20 +678,33 @@ class LearningEngine:
         for error in self.error_repo.errors:
             errors_by_skill[error.skill_name].append(error)
 
+        failures_by_skill = defaultdict(list)
+        for failure in self.failure_repo.failures:
+            failures_by_skill[failure.skill_name].append(failure)
+
         metrics.errors_analyzed = len(self.error_repo.errors)
 
+        # Track unclassified errors for pattern suggestion
+        unclassified_errors: List[ErrorRecord] = []
+
         # Detect patterns for each skill
-        for skill_name, errors in errors_by_skill.items():
-            if not errors:
-                continue
+        for skill_name in sorted(set(errors_by_skill) | set(failures_by_skill)):
+            errors = errors_by_skill.get(skill_name, [])
+            skill_failures = failures_by_skill.get(skill_name, [])
 
-            # Update detector thresholds
-            self.pattern_detector.min_frequency = min_frequency
-            self.pattern_detector.min_confidence = min_confidence
+            if errors:
+                # Update detector thresholds
+                self.pattern_detector.min_frequency = min_frequency
+                self.pattern_detector.min_confidence = min_confidence
 
-            # Detect patterns
-            patterns = self.pattern_detector.detect_patterns(errors)
-            metrics.patterns_detected += len(patterns)
+                # Detect patterns
+                patterns = self.pattern_detector.detect_patterns(errors)
+                metrics.patterns_detected += len(patterns)
+            else:
+                patterns = []
+
+            # Collect error types that got patterns
+            patterned_types = {p[0] for p in patterns}
 
             # Generate rules for each pattern
             for error_type, confidence, frequency, features in patterns:
@@ -564,6 +729,144 @@ class LearningEngine:
                         metrics.rules_generated += 1
                         self.total_rules_generated += 1
                         logger.info(f"Generated rule: {rule.name} for {skill_name}")
+
+                # Always generate correction text for LangGraph-facing injection.
+                # Group failures by failing tool so each (error_type, tool)
+                # pair gets its own scoped correction — avoids cross-tool
+                # keyword contamination (e.g. git_commit keywords mixed with
+                # fetch_economic_data keywords in one correction).
+                type_errors = [e for e in errors if e.error_type == error_type]
+                type_failures = [
+                    failure for failure in skill_failures
+                    if failure.error_type == error_type
+                ]
+                # Partition by failing tool
+                failures_by_tool: Dict[str, List[Any]] = {}
+                for failure in type_failures:
+                    expected = getattr(failure, "expected", {}) or {}
+                    actual = getattr(failure, "actual", {}) or {}
+                    tool = expected.get("tool") or actual.get("tool") or "__unknown__"
+                    failures_by_tool.setdefault(tool, []).append(failure)
+                if not failures_by_tool:
+                    failures_by_tool["__no_failures__"] = []
+                for tool, tool_failures in failures_by_tool.items():
+                    correction = self.correction_generator.generate(
+                        skill_name=skill_name,
+                        error_type=error_type,
+                        errors=type_errors,
+                        failures=tool_failures if tool_failures else type_failures,
+                        llm_provider=llm_provider,
+                    )
+                    if correction:
+                        before_count = len(self.knowledge_base.get_corrections(skill_name))
+                        self.knowledge_base.add_correction(skill_name, correction)
+                        after_count = len(self.knowledge_base.get_corrections(skill_name))
+                        if after_count > before_count:
+                            metrics.corrections_generated += 1
+                            logger.info(
+                                "Generated correction for %s/%s tool=%s",
+                                skill_name,
+                                error_type,
+                                tool,
+                            )
+
+            # Generate corrections from normalized failures even when the
+            # corresponding legacy errors were not stored.
+            failure_types = defaultdict(list)
+            for failure in skill_failures:
+                failure_types[failure.error_type].append(failure)
+
+            for error_type, type_failures in failure_types.items():
+                frequency = len(type_failures)
+                if frequency < min_frequency:
+                    continue
+
+                confidence = frequency / len(skill_failures) if skill_failures else 0.0
+
+                if error_type not in patterned_types:
+                    metrics.patterns_detected += 1
+
+                    existing_rules = self.knowledge_base.get_rules(skill_name)
+                    already_has_rule = any(
+                        r.source_error_type == error_type
+                        and r.status != RuleStatus.DORMANT
+                        for r in existing_rules
+                    )
+
+                    if not already_has_rule:
+                        rule = self.rule_generator.generate_rule_from_error(
+                            error_type, frequency, confidence
+                        )
+                        if rule:
+                            self.knowledge_base.add_rule(skill_name, rule)
+                            metrics.rules_generated += 1
+                            self.total_rules_generated += 1
+                            logger.info(
+                                "Generated failure-backed rule for %s/%s",
+                                skill_name,
+                                error_type,
+                            )
+
+                existing_rules = self.knowledge_base.get_rules(skill_name)
+                already_has_recovery = any(
+                    r.source_error_type == error_type
+                    and r.rule_type == RuleType.RECOVERY
+                    and r.status != RuleStatus.DORMANT
+                    for r in existing_rules
+                )
+                if not already_has_recovery:
+                    rule = self.rule_generator.generate_recovery_rule_from_error(
+                        error_type, frequency, confidence,
+                    )
+                    if rule:
+                        self.knowledge_base.add_rule(skill_name, rule)
+                        metrics.rules_generated += 1
+                        self.total_rules_generated += 1
+                        logger.info(
+                            "Generated failure-backed recovery rule for %s/%s",
+                            skill_name,
+                            error_type,
+                        )
+
+                if error_type in patterned_types:
+                    continue
+
+                # Partition by failing tool (same as primary path above)
+                ft_by_tool: Dict[str, List[Any]] = {}
+                for failure in type_failures:
+                    expected = getattr(failure, "expected", {}) or {}
+                    actual = getattr(failure, "actual", {}) or {}
+                    tool = expected.get("tool") or actual.get("tool") or "__unknown__"
+                    ft_by_tool.setdefault(tool, []).append(failure)
+                if not ft_by_tool:
+                    ft_by_tool["__no_failures__"] = []
+                for tool, tool_ft in ft_by_tool.items():
+                    correction = self.correction_generator.generate(
+                        skill_name=skill_name,
+                        error_type=error_type,
+                        errors=[],
+                        failures=tool_ft if tool_ft else type_failures,
+                        llm_provider=llm_provider,
+                    )
+                    if not correction:
+                        continue
+
+                    before_count = len(self.knowledge_base.get_corrections(skill_name))
+                    self.knowledge_base.add_correction(skill_name, correction)
+                    after_count = len(self.knowledge_base.get_corrections(skill_name))
+                    if after_count > before_count:
+                        metrics.corrections_generated += 1
+                        logger.info(
+                            "Generated failure-backed correction for %s/%s tool=%s",
+                            skill_name,
+                            error_type,
+                            tool,
+                        )
+
+            # Collect unclassified errors for pattern suggestion
+            for e in errors:
+                if e.error_type == "GenericError" or e.error_type not in patterned_types:
+                    unclassified_errors.append(e)
 
         # Pass 2: Generate RECOVERY rules from step-level errors
         step_errors_by_skill = defaultdict(list)
@@ -610,6 +913,26 @@ class LearningEngine:
                             f"for {skill_name}"
                         )
 
+        # Pass 3: Suggest new patterns for unclassified errors via LLM
+        if llm_provider and len(unclassified_errors) >= 5:
+            # Group unclassified by error_type
+            unclassified_by_type = defaultdict(list)
+            for e in unclassified_errors:
+                unclassified_by_type[e.error_type].append(e)
+
+            for error_type, type_errors in unclassified_by_type.items():
+                if len(type_errors) < 5:
+                    continue
+                if error_type in RuleGenerator.PATTERN_LIBRARY:
+                    continue
+                examples = [e.to_dict() for e in type_errors[:5]]
+                suggested = RuleGenerator.suggest_pattern(
+                    error_type, examples, llm_provider
+                )
+                if suggested:
+                    RuleGenerator.register_pattern(error_type, suggested)
+                    logger.info(f"Registered suggested pattern: {error_type}")
+
         # Calculate rule success rate
         kb_stats = self.knowledge_base.get_statistics()
         metrics.rules_applied_total = kb_stats['total_applications']
@@ -617,6 +940,7 @@ class LearningEngine:
 
         # Save knowledge base
         self.knowledge_base.save_rules()
+        self.knowledge_base.save_corrections()
 
         logger.info(f"Learning cycle complete: {metrics.to_dict()}")
 
@@ -628,6 +952,7 @@ class LearningEngine:
 
         return {
             'total_errors': len(self.error_repo.errors),
+            'total_failures': len(self.failure_repo.failures),
             'total_successes': len(self.success_repo.successes),
             'learning_cycles': self.learning_cycles,
             'total_rules': kb_stats['total_rules'],
@@ -640,6 +965,7 @@ class LearningEngine:
     def clear_data(self):
         """Clear all learning data (for testing)"""
         self.error_repo.clear()
+        self.failure_repo.clear()
         self.step_error_repo.clear()
         self.success_repo.clear()
         self.learning_cycles = 0

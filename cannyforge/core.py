@@ -324,7 +324,22 @@ class CannyForge:
         # Add common aliases
         for alias, etype in [('spam', 'SpamTriggerError'),
                              ('vague', 'PoorQueryError'),
-                             ('query', 'PoorQueryError')]:
+                             ('query', 'PoorQueryError'),
+                             # Tool use accuracy aliases
+                             ('wrong tool', 'WrongToolError'),
+                             ('incorrect tool', 'WrongToolError'),
+                             ('missing param', 'MissingParamError'),
+                             ('required param', 'MissingParamError'),
+                             ('wrong type', 'WrongParamTypeError'),
+                             ('type mismatch', 'WrongParamTypeError'),
+                             ('extra param', 'ExtraParamError'),
+                             ('unnecessary param', 'ExtraParamError'),
+                             ('ambiguous', 'AmbiguityError'),
+                             ('unclear', 'AmbiguityError'),
+                             ('format', 'FormatError'),
+                             ('schema', 'FormatError'),
+                             ('missing context', 'ContextMissError'),
+                             ('prior context', 'ContextMissError')]:
             pattern = re.compile(r'\b' + re.escape(alias) + r'\b')
             # Only add if not already covered
             if not any(p.pattern == pattern.pattern for p in keywords):
@@ -345,38 +360,141 @@ class CannyForge:
 
     def run_learning_cycle(self,
                           min_frequency: int = 3,
-                          min_confidence: float = 0.5) -> LearningMetrics:
+                          min_confidence: float = 0.5,
+                          llm_provider: Any = None) -> LearningMetrics:
         """
         Run a learning cycle to detect patterns and generate rules
+
+        Args:
+            llm_provider: Optional override; falls back to self.llm_provider if None
 
         Returns:
             LearningMetrics with cycle results
         """
-        return self.learning_engine.run_learning_cycle(min_frequency, min_confidence)
+        return self.learning_engine.run_learning_cycle(
+            min_frequency,
+            min_confidence,
+            llm_provider=llm_provider or self.llm_provider,
+        )
+
+    def export_skill(self, skill_name: str, output_path: str) -> None:
+        """Export portable corrections for a skill to a .cannyforge bundle."""
+        import json
+        import zipfile
+        from time import time
+
+        corrections = self.knowledge_base.get_corrections(skill_name)
+        exportable = [
+            correction for correction in corrections
+            if correction.effectiveness == -1.0 or correction.effectiveness >= 0.4
+        ]
+
+        manifest = {
+            "skill_name": skill_name,
+            "exported_at": time(),
+            "cannyforge_version": "0.3.0",
+            "correction_count": len(exportable),
+        }
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+            bundle.writestr(
+                "corrections.json",
+                json.dumps([correction.to_dict() for correction in exportable], indent=2),
+            )
+
+            skill_md = Path(__file__).parent / "bundled_skills" / skill_name / "SKILL.md"
+            if skill_md.exists():
+                bundle.write(skill_md, "SKILL.md")
+
+    def import_skill(self, bundle_path: str, confidence_discount: float = 0.5,
+                      skill_name_override: Optional[str] = None) -> int:
+        """Import corrections from a .cannyforge bundle into the local knowledge base.
+
+        Args:
+            bundle_path: Path to the .cannyforge bundle file.
+            confidence_discount: Unused (reserved for future discount factor).
+            skill_name_override: If provided, store all corrections under this
+                skill name instead of the one recorded in the bundle. Useful when
+                the bundle was exported from a differently-named skill.
+        """
+        import json
+        import zipfile
+
+        from cannyforge.corrections import Correction
+
+        _ = confidence_discount
+        bundle = Path(bundle_path)
+        if not bundle.exists():
+            raise FileNotFoundError(f"Bundle not found: {bundle_path}")
+
+        imported = 0
+        with zipfile.ZipFile(bundle, "r") as archive:
+            if "corrections.json" not in archive.namelist():
+                raise ValueError("Bundle missing corrections.json")
+
+            corrections_data = json.loads(archive.read("corrections.json"))
+            for correction_data in corrections_data:
+                correction = Correction.from_dict(correction_data)
+                correction.times_injected = 0
+                correction.times_effective = 0
+                target_skill = skill_name_override or correction.skill_name
+                self.knowledge_base.add_correction(target_skill, correction)
+                imported += 1
+
+        self.knowledge_base.save_corrections()
+        return imported
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive statistics"""
         learning_stats = self.learning_engine.get_statistics()
         kb_stats = self.knowledge_base.get_statistics()
 
+        # When in-memory counters are fresh (new process), derive from the
+        # repositories that already loaded their records from disk on init.
+        if self.tasks_executed == 0:
+            tasks_succeeded = learning_stats['total_successes']
+            tasks_failed = learning_stats['total_errors']
+            tasks_executed = tasks_succeeded + tasks_failed
+
+            successes = self.learning_engine.success_repo.successes
+            errors = self.learning_engine.error_repo.errors
+            skill_stats = {}
+            for name in self.skill_registry.list_skills():
+                s = sum(1 for r in successes if r.skill_name == name)
+                f = sum(1 for r in errors if r.skill_name == name)
+                total = s + f
+                skill_stats[name] = {
+                    'executions': total,
+                    'success_rate': s / total if total > 0 else 0,
+                }
+        else:
+            tasks_executed = self.tasks_executed
+            tasks_succeeded = self.tasks_succeeded
+            tasks_failed = self.tasks_failed
+            skill_stats = {
+                name: {
+                    'executions': skill.executions,
+                    'success_rate': skill.success_rate,
+                }
+                for name, skill in self.skill_registry.skills.items()
+            }
+
         return {
             'execution': {
-                'tasks_executed': self.tasks_executed,
-                'tasks_succeeded': self.tasks_succeeded,
-                'tasks_failed': self.tasks_failed,
-                'success_rate': self.tasks_succeeded / self.tasks_executed if self.tasks_executed > 0 else 0,
+                'tasks_executed': tasks_executed,
+                'tasks_succeeded': tasks_succeeded,
+                'tasks_failed': tasks_failed,
+                'success_rate': tasks_succeeded / tasks_executed if tasks_executed > 0 else 0,
             },
             'learning': learning_stats,
             'knowledge': kb_stats,
             'skills': {
                 'available': self.skill_registry.list_skills(),
-                'skill_stats': {
-                    name: {
-                        'executions': skill.executions,
-                        'success_rate': skill.success_rate,
-                    }
-                    for name, skill in self.skill_registry.skills.items()
-                }
+                'skill_stats': skill_stats,
             }
         }
 

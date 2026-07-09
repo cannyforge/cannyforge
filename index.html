@@ -185,49 +185,53 @@
 
         <div class="hero">
             <h1>Agents That Actually Learn</h1>
-            <p>Skills are defined declaratively via SKILL.md files. The engine handles execution, error detection, pattern learning, rule application, and lifecycle automatically.</p>
+            <p>The only benchmark that measures tool-use quality at the call level — arg_quality, sequence, recovery, and call_efficiency, all programmatically with no LLM-as-judge. 15 multi-turn scenarios across coding, data, and MCP domains. CannyForge lifts arg_quality from 0.837 to 1.000.</p>
             <a href="#quickstart" class="btn btn-secondary">Try It Now</a>
         </div>
 
         <div class="stats">
             <div class="stat">
-                <div class="stat-value">254</div>
+                <div class="stat-value">519</div>
                 <div class="stat-label">Tests</div>
             </div>
             <div class="stat">
-                <div class="stat-value">11</div>
-                <div class="stat-label">CLI Commands</div>
+                <div class="stat-value">15</div>
+                <div class="stat-label">Benchmark Scenarios</div>
             </div>
             <div class="stat">
-                <div class="stat-value">4</div>
-                <div class="stat-label">Built-in Skills</div>
+                <div class="stat-value">5</div>
+                <div class="stat-label">Scoring Dimensions</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">6</div>
+                <div class="stat-label">Failure Detectors</div>
             </div>
         </div>
 
         <div class="features">
             <div class="feature">
-                <h3>Declarative Skills</h3>
-                <p>Define skills via SKILL.md files following the AgentSkills.io spec. No Python subclassing required.</p>
+                <h3>FSI-80 Benchmark</h3>
+                <p>15 multi-turn scenarios across coding, data, and MCP domains. 5 scoring dimensions, 6 failure-mode detectors, 4 ablation conditions, Pass^k reliability.</p>
             </div>
             <div class="feature">
                 <h3>Automatic Learning</h3>
-                <p>Monitors errors, detects patterns, generates rules. Triggers automatically when 2+ uncovered error types appear.</p>
+                <p>Observes tool errors, clusters failures by tool and type, generates scoped corrections. EIR/ECR tracking with stability gate and auto-pruning.</p>
             </div>
             <div class="feature">
-                <h3>Rule Lifecycle</h3>
-                <p>Rules that underperform are demoted to PROBATION, then DORMANT — never deleted. Resurrection when errors resurface.</p>
+                <h3>LangGraph Middleware</h3>
+                <p>3-line integration. before_model injects corrections. after_model records errors. finalize_task tracks effectiveness.</p>
             </div>
             <div class="feature">
-                <h3>Framework Integrations</h3>
-                <p>Works with LangChain and CrewAI. Wrap any skill as a tool for your existing agent.</p>
+                <h3>Framework Support</h3>
+                <p>LangGraph (full correction loop), LangChain + CrewAI (skill wrappers), MCP (tool protocol). OpenAI Agents SDK planned.</p>
             </div>
             <div class="feature">
-                <h3>LLM-Powered</h3>
-                <p>Three-tier execution: custom handler → LLM multi-step loop → template fallback. Your choice.</p>
+                <h3>Programmatic Scoring</h3>
+                <p>No LLM-as-judge. Deterministic scoring across tool_selection, arg_quality, sequence, recovery, and call_efficiency.</p>
             </div>
             <div class="feature">
-                <h3>Storage Options</h3>
-                <p>JSON file or SQLite backend. Your data stays on your machine.</p>
+                <h3>Pass^k Reliability</h3>
+                <p>Measures probability of succeeding K consecutive times. The honest metric for agents that should get more reliable, not just peak once.</p>
             </div>
         </div>
 
@@ -239,17 +243,21 @@
 pip install cannyforge
 
 <span class="comment"># Run the demo</span>
-cannyforge demo
+python benchmark/scenario_harness.py \
+    --model deepseek-v4-flash --no-think \
+    --domains coding data mcp --passk 3
 
-<span class="comment"># Or use in code</span>
+<span class="comment"># Or use in code (3-line LangGraph integration)</span>
 <span class="keyword">from</span> cannyforge <span class="keyword">import</span> CannyForge
+<span class="keyword">from</span> cannyforge.adapters.langgraph <span class="keyword">import</span> CannyForgeMiddleware
+<span class="keyword">from</span> langgraph.prebuilt <span class="keyword">import</span> create_react_agent
 
 forge = CannyForge()
-result = forge.execute(<span class="string">"Write an email about the 3 PM meeting"</span>)
-
-<span class="comment"># First run: False (TimezoneError logged)</span>
-<span class="comment"># After learning: True (rule prevents the error)</span>
-<span class="keyword">print</span>(result.success, result.output)
+middleware = CannyForgeMiddleware(forge)
+agent = create_react_agent(model, tools,
+    pre_model_hook=middleware.before_model,
+    post_model_hook=middleware.after_model)
+<span class="comment"># Agent learns from tool errors automatically</span>
                 </code>
             </div>
         </div>

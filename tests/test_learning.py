@@ -8,6 +8,7 @@ from cannyforge.learning import (
     LearningEngine, PatternDetector, ErrorRepository, SuccessRepository,
     ErrorRecord, StepErrorRecord, StepErrorRepository,
 )
+from cannyforge.failures import FailureRecord
 from cannyforge.knowledge import KnowledgeBase, RuleGenerator, RuleType
 
 
@@ -113,6 +114,24 @@ class TestLearningEngine:
         stats = engine.get_statistics()
         assert stats["total_successes"] > 0
 
+    def test_record_failure(self, knowledge_base, tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+        record = engine.record_failure(
+            skill_name="tool_use_fsi",
+            task_description="review, validate, then trade",
+            failure_class="SequenceViolation",
+            phase="sequence",
+            severity="high",
+            expected={"tool": "execute_trade", "step": 3},
+            actual={"tool": "execute_trade", "step": 2},
+            evidence={"ordering": "strict"},
+            scenario_id="C01",
+            legacy_error_type="SequenceViolationError",
+        )
+        assert isinstance(record, FailureRecord)
+        assert len(engine.failure_repo.failures) == 1
+        assert engine.failure_repo.failures[0].failure_class == "SequenceViolation"
+
     def test_learning_cycle_generates_rules(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
 
@@ -130,10 +149,96 @@ class TestLearningEngine:
         metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
         assert metrics.patterns_detected >= 1
         assert metrics.rules_generated >= 1
+        assert metrics.corrections_generated >= 1
 
         # Verify rule was added to knowledge base
         rules = knowledge_base.get_rules("email_writer")
         assert len(rules) >= 1
+        corrections = knowledge_base.get_corrections("email_writer")
+        assert len(corrections) >= 1
+
+    def test_learning_cycle_uses_failure_context_in_corrections(self, knowledge_base,
+                                                                tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(3):
+            engine.record_error(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                error_type="PrematureExitError",
+                error_message="Stopped before execute_trade",
+                context_snapshot={"context": {"requires_prior_context": True}},
+                rules_applied=[],
+            )
+            engine.record_failure(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                failure_class="PrematureExit",
+                phase="completion",
+                expected={"tool": "execute_trade", "step": 3},
+                actual={"called_tools": ["fetch_client_portfolio", "run_compliance_check"]},
+                evidence={"missing_step": 3},
+                legacy_error_type="PrematureExitError",
+            )
+
+        metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
+        assert metrics.corrections_generated >= 1
+
+        corrections = knowledge_base.get_corrections("tool_use_fsi")
+        assert len(corrections) >= 1
+        assert any("execute_trade" in correction.content for correction in corrections)
+
+    def test_learning_cycle_generates_rules_from_failures(self, knowledge_base,
+                                                          tmp_data_dir):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(3):
+            engine.record_failure(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                failure_class="SequenceViolation",
+                phase="sequence",
+                expected={"tool": "execute_trade", "step": 3},
+                actual={"tool": "execute_trade", "step": 2},
+                evidence={"ordering": "strict"},
+                legacy_error_type="SequenceViolationError",
+            )
+
+        metrics = engine.run_learning_cycle(min_frequency=3, min_confidence=0.3)
+        assert metrics.rules_generated >= 1
+
+        rules = knowledge_base.get_rules("tool_use_fsi")
+        assert any(rule.source_error_type == "SequenceViolationError" for rule in rules)
+        assert any(rule.rule_type == RuleType.RECOVERY for rule in rules)
+
+    def test_learning_cycle_does_not_override_known_patterns_with_suggestions(
+        self,
+        knowledge_base,
+        tmp_data_dir,
+        monkeypatch,
+    ):
+        engine = LearningEngine(knowledge_base, tmp_data_dir)
+
+        for i in range(5):
+            engine.record_error(
+                skill_name="tool_use_fsi",
+                task_description=f"review account then trade {i}",
+                error_type="WrongToolError",
+                error_message="Observed benchmark failure: wrong_tool",
+                context_snapshot={},
+                rules_applied=[],
+            )
+
+        monkeypatch.setattr(engine.pattern_detector, "detect_patterns", lambda errors: [])
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("suggest_pattern should not run for known error types")
+
+        monkeypatch.setattr(RuleGenerator, "suggest_pattern", staticmethod(fail_if_called))
+        metrics = engine.run_learning_cycle(min_frequency=1, min_confidence=0.5, llm_provider=object())
+
+        assert metrics.patterns_detected == 0
+        assert metrics.corrections_generated == 0
 
     def test_clear_data(self, knowledge_base, tmp_data_dir):
         engine = LearningEngine(knowledge_base, tmp_data_dir)
@@ -142,9 +247,14 @@ class TestLearningEngine:
             error_type="E", error_message="m",
             context_snapshot={}, rules_applied=[],
         )
+        engine.record_failure(
+            skill_name="s", task_description="t",
+            failure_class="WrongTool", phase="selection",
+        )
         engine.clear_data()
         stats = engine.get_statistics()
         assert stats["total_errors"] == 0
+        assert stats["total_failures"] == 0
 
 
 class TestStepErrorRepository:

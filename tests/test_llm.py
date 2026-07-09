@@ -5,12 +5,61 @@ import pytest
 from cannyforge.llm import (
     LLMProvider, LLMRequest, LLMResponse, MockProvider,
     ToolCall, ToolResult,
+    _OpenAICompatibleProvider, ClaudeProvider,
 )
 from cannyforge.skills import (
     DeclarativeSkill, ExecutionContext, ExecutionResult, ExecutionStatus,
     SkillOutput, SkillLoader,
 )
 from cannyforge.knowledge import KnowledgeBase, Rule, RuleType, Condition, ConditionOperator, Action
+
+
+class TestSystemPromptWarnings:
+    """Test that _build_system_prompt surfaces CannyForge warnings."""
+
+    def test_openai_compatible_surfaces_warnings(self):
+        """OpenAI-compatible provider should include warnings in system prompt."""
+        provider = _OpenAICompatibleProvider.__new__(_OpenAICompatibleProvider)
+        request = LLMRequest(
+            task_description="test",
+            skill_name="tool_use",
+            skill_description="Tool selection",
+            context={
+                "warnings": ["STOP: You picked the wrong tool."],
+                "suggestions": ["Try calculate instead."],
+            },
+        )
+        prompt = provider._build_system_prompt(request)
+        assert "IMPORTANT - Learned rules from previous errors:" in prompt
+        assert "STOP: You picked the wrong tool." in prompt
+        assert "Try calculate instead." in prompt
+
+    def test_openai_compatible_no_warnings_section_without_warnings(self):
+        """No IMPORTANT section when there are no warnings."""
+        provider = _OpenAICompatibleProvider.__new__(_OpenAICompatibleProvider)
+        request = LLMRequest(
+            task_description="test",
+            skill_name="tool_use",
+            skill_description="Tool selection",
+            context={},
+        )
+        prompt = provider._build_system_prompt(request)
+        assert "IMPORTANT" not in prompt
+
+    def test_claude_surfaces_warnings(self):
+        """Claude provider should include warnings in system prompt."""
+        provider = ClaudeProvider.__new__(ClaudeProvider)
+        request = LLMRequest(
+            task_description="test",
+            skill_name="tool_use",
+            skill_description="Tool selection",
+            context={
+                "warnings": ["STOP: Wrong tool."],
+            },
+        )
+        prompt = provider._build_system_prompt(request)
+        assert "IMPORTANT - Learned rules from previous errors:" in prompt
+        assert "STOP: Wrong tool." in prompt
 
 
 class TestLLMDataStructures:

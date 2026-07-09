@@ -182,7 +182,7 @@ def cmd_stats(args):
 
 
 def cmd_rules(args):
-    """Inspect rules for a skill."""
+    """Inspect rules and corrections for a skill."""
     from cannyforge.core import CannyForge
 
     forge = CannyForge()
@@ -194,12 +194,15 @@ def cmd_rules(args):
 
     for skill_name in skill_names:
         rules = forge.knowledge_base.get_rules(skill_name)
-        if not rules:
+        corrections = forge.knowledge_base.get_corrections(skill_name)
+
+        if not rules and not corrections:
             print(f"\n{skill_name}: no rules")
             continue
 
-        print(f"\n\033[1m{skill_name}\033[0m ({len(rules)} rules)")
+        print(f"\n\033[1m{skill_name}\033[0m ({len(rules)} rules, {len(corrections)} corrections)")
         print("-" * 60)
+
         for rule in rules:
             status_colors = {
                 "active": "\033[92m",
@@ -209,14 +212,21 @@ def cmd_rules(args):
             color = status_colors.get(rule.status.value, "")
             reset = "\033[0m"
 
-            print(f"  {rule.name}")
-            print(f"    ID:         {rule.id}")
+            print(f"  [rule] {rule.name}")
             print(f"    Type:       {rule.rule_type.value}")
             print(f"    Status:     {color}{rule.status.value}{reset}")
             print(f"    Confidence: {rule.confidence:.2f}")
             print(f"    Applied:    {rule.times_applied} ({rule.times_successful} successful)")
             print(f"    Effect:     {rule.effectiveness:.2f}")
             print(f"    Rule:       {rule}")
+            print()
+
+        for correction in corrections:
+            eff = correction.effectiveness
+            eff_str = f"{eff:.2f}" if eff >= 0 else "unrated"
+            print(f"  [correction/{correction.correction_type}] {correction.id}")
+            print(f"    Content:    {correction.content[:100]}{'...' if len(correction.content) > 100 else ''}")
+            print(f"    Injected:   {correction.times_injected}  Effective: {correction.times_effective}  ({eff_str})")
             print()
 
 
@@ -243,6 +253,16 @@ def cmd_install(args):
     """Install a skill from GitHub."""
     from cannyforge.registry import SkillRegistry
     SkillRegistry.install(args.spec, args.target)
+
+
+def cmd_import(args):
+    """Import a .cannyforge correction bundle."""
+    from cannyforge.core import CannyForge
+
+    forge = CannyForge()
+    count = forge.import_skill(args.bundle, skill_name_override=args.skill)
+    skill_label = args.skill or "(bundle default)"
+    print(f"Imported {count} correction(s) from {args.bundle} → skill '{skill_label}'")
 
 
 def cmd_publish(args):
@@ -336,6 +356,12 @@ def main():
     p_install.add_argument("spec", help="GitHub spec: github:user/repo/path/to/skill")
     p_install.add_argument("--target", type=str, default=None, help="Target directory")
 
+    # import
+    p_import = subparsers.add_parser("import", help="Import a .cannyforge correction bundle")
+    p_import.add_argument("bundle", help="Path to the .cannyforge bundle file")
+    p_import.add_argument("--skill", default=None,
+                          help="Store corrections under this skill name instead of the bundle default")
+
     # publish
     p_publish = subparsers.add_parser("publish", help="Publish a skill (validate + share)")
     p_publish.add_argument("skill_dir", help="Path to skill directory")
@@ -366,6 +392,7 @@ def main():
         "rules": cmd_rules,
         "learn": cmd_learn,
         "install": cmd_install,
+        "import": cmd_import,
         "publish": cmd_publish,
         "export": cmd_export,
         "serve": cmd_serve,
