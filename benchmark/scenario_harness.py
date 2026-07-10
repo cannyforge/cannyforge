@@ -709,12 +709,7 @@ class LLMScenarioRunner:
                 pre = _verbose_pre_hook(pre, condition)
             hooks = {"pre_model_hook": pre, "post_model_hook": post}
 
-        max_calls = scenario.get("expected_trace", {}).get("max_calls", 10)
-        agent = create_react_agent(
-            self.llm, tools,
-            recursion_limit=max(10, max_calls * 3),
-            **hooks,
-        )
+        agent = create_react_agent(self.llm, tools, **hooks)
         if self.middleware is not None and hasattr(self.middleware, "begin_task"):
             self.middleware.begin_task()
 
@@ -761,6 +756,8 @@ class LLMScenarioRunner:
 
         t0 = time.monotonic()
         try:
+            max_calls = scenario.get("expected_trace", {}).get("max_calls", 10)
+            hard_limit = max(10, max_calls * 3)
             result = agent.invoke({
                 "messages": messages,
                 "scenario_domain": domain,
@@ -771,7 +768,7 @@ class LLMScenarioRunner:
                 "completed_tools": [],
                 "prerequisite_map": prerequisite_map,
                 "final_answer_started": False,
-            })
+            }, {"recursion_limit": hard_limit})
             out_messages = result.get("messages", [])
         except Exception as exc:
             return RunResult(
