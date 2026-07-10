@@ -709,7 +709,12 @@ class LLMScenarioRunner:
                 pre = _verbose_pre_hook(pre, condition)
             hooks = {"pre_model_hook": pre, "post_model_hook": post}
 
-        agent = create_react_agent(self.llm, tools, **hooks)
+        max_calls = scenario.get("expected_trace", {}).get("max_calls", 10)
+        agent = create_react_agent(
+            self.llm, tools,
+            recursion_limit=max(10, max_calls * 3),
+            **hooks,
+        )
         if self.middleware is not None and hasattr(self.middleware, "begin_task"):
             self.middleware.begin_task()
 

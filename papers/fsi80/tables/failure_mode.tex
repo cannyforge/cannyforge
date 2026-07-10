@@ -1,0 +1,12 @@
+\begin{tabular}{lrrrr}
+\toprule
+Failure mode & baseline & static & cannyforge & static$+$cf \\
+\midrule
+arg\_mangling    & 0.779 & 0.840 & 0.902 & 0.930 \\
+retry\_loop      & 0.868 & 0.810 & 0.931 & 0.900 \\
+sequence\_violation & 0.952 & 1.000 & 0.989 & 1.000 \\
+context\_amnesia  & 0.950 & 0.950 & 0.952 & 0.950 \\
+hallucinated\_tool & 0.975 & 0.975 & 0.975 & 0.975 \\
+wrong\_tool       & 0.798 & 0.926 & 0.829 & 0.889 \\
+\bottomrule
+\end{tabular}
