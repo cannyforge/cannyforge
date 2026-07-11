@@ -755,27 +755,39 @@ class LLMScenarioRunner:
                     _vprint(f"    ... ({len(system_text.splitlines())-6} more lines)")
 
         t0 = time.monotonic()
-        try:
-            max_calls = scenario.get("expected_trace", {}).get("max_calls", 10)
-            hard_limit = max(10, max_calls * 3)
-            result = agent.invoke({
-                "messages": messages,
-                "scenario_domain": domain,
-                "metadata": {"scenario_domain": domain},
-                "available_tools": list(scenario.get("tools", [])),
-                "required_steps": required_steps,
-                "completed_steps": [],
-                "completed_tools": [],
-                "prerequisite_map": prerequisite_map,
-                "final_answer_started": False,
-            }, {"recursion_limit": hard_limit})
-            out_messages = result.get("messages", [])
-        except Exception as exc:
+        max_calls = scenario.get("expected_trace", {}).get("max_calls", 10)
+        hard_limit = max(10, max_calls * 3)
+        invoke_input = {
+            "messages": messages,
+            "scenario_domain": domain,
+            "metadata": {"scenario_domain": domain},
+            "available_tools": list(scenario.get("tools", [])),
+            "required_steps": required_steps,
+            "completed_steps": [],
+            "completed_tools": [],
+            "prerequisite_map": prerequisite_map,
+            "final_answer_started": False,
+        }
+        # Retry transient errors (Ollama 500, timeout) up to 2 times
+        out_messages = None
+        last_exc = None
+        for attempt in range(3):
+            try:
+                result = agent.invoke(invoke_input,
+                                      {"recursion_limit": hard_limit})
+                out_messages = result.get("messages", [])
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))  # 2s, 4s
+        if last_exc is not None:
             return RunResult(
                 scenario_id=scenario["id"], condition=condition,
                 score=TraceScore(scenario_id=scenario["id"]),
                 elapsed_ms=(time.monotonic() - t0) * 1000,
-                error=str(exc),
+                error=str(last_exc),
             )
 
         elapsed = (time.monotonic() - t0) * 1000
