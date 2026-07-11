@@ -1015,7 +1015,25 @@ class CannyForgeMiddleware:
             except ImportError:
                 injection = {"role": "system", "content": text}
 
-            messages = [injection] + messages
+            # Merge into existing system message at position 0 rather than
+            # prepending a second one.  Some servers (MLX, qwen) reject
+            # system messages that appear after user/tool messages.
+            # Only keep the latest CF injection — strip any prior CF block
+            # from the existing system content to avoid accumulation.
+            _CF_MARKER = "[CANNYFORGE]"
+            first_is_system = (
+                messages
+                and hasattr(messages[0], "type")
+                and messages[0].type == "system"
+            )
+            if first_is_system:
+                existing = (messages[0].content or "").split(_CF_MARKER)[0].strip()
+                if existing:
+                    messages[0] = type(messages[0])(content=text + "\n\n" + existing)
+                else:
+                    messages[0] = type(messages[0])(content=text)
+            else:
+                messages = [injection] + messages
             if injection_signature:
                 self._task_injection_signatures.add(injection_signature)
             debug_record["injected"] = True
