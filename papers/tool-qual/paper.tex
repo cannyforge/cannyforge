@@ -1,0 +1,243 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{\textbf{Measuring What Happens Between Tool Calls:} \\
+       \large A Framework and Benchmark for Agentic Tool-Use Quality}
+
+\author{Xiwei Zhou \\
+        \texttt{cannyforge.dev} \\
+        \texttt{cannyforge@gmail.com}}
+
+\date{July 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Tool-use evaluation in LLM agents has focused on two dimensions: tool
+\emph{selection} accuracy and task \emph{completion}. Neither measures what
+happens \emph{between} tool calls---whether the agent passes correct arguments,
+respects prerequisite ordering, recovers from errors without looping, remembers
+results it already fetched, or stays within a call budget.
+
+We introduce a 6-layer capacity framework that defines tool-use behavioral
+quality across 19 measurable dimensions, and present an instantiation covering
+layers L2 (Execution) and L3 (Recovery): 15 multi-turn scenarios across coding,
+data analysis, and MCP orchestration, scored programmatically across 5
+dimensions with 6 failure-mode detectors. We run 360 trials across two model
+families (DeepSeek-v4-Flash and Qwen3.6-27B) under 4 ablation conditions.
+
+The framework reveals patterns invisible to existing benchmarks: static
+domain-level prompts bleed across scenarios, causing catastrophic
+over-exploration; learned corrections lift argument quality from 0.837 to 1.000
+on DeepSeek but only 0.733 to 0.767 on Qwen; and Pass$^3$ reliability
+degrades significantly on weaker models (0.800$\rightarrow$0.500 on Qwen
+baseline) while remaining stable with both corrections and domain rules. The
+framework, harness, and scenario set are open-source under BSL 1.1.
+\end{abstract}
+
+\section{Introduction}
+
+Tool-using LLM agents dominate production AI in 2026. Benchmarks for
+evaluating them measure the wrong things. BFCL~\cite{bfcl} measures tool
+\emph{selection}---did the model pick the right function? Top models score
+above 90\%. SWE-bench~\cite{swebench} measures task \emph{completion}---did
+the repo get fixed? $\tau$-bench~\cite{taubench} measures multi-turn task
+success using LLM-as-judge.
+
+None measure \emph{tool-use behavioral quality} at the individual call level.
+When an agent calls \texttt{send\_email} with \texttt{recipient=} instead of
+\texttt{to=}, does it recover? When it calls \texttt{search\_web} three times
+instead of using results it already fetched, does the scoring catch it? When a
+human-written rule causes the agent to make 20 git introspection calls on a
+commit task, is anyone measuring that?
+
+Weng~\cite{weng2026harness} argues that the ``harness''---the system
+orchestrating execution, context, tools, and evaluation---is as important as
+the model's raw intelligence. She identifies the need for ``fast and precise
+verifiers'' and ``rich failure records containing the causal status of agent
+behavior.'' This paper operationalizes that vision for tool use.
+
+Our contributions: (1) a 6-layer capacity framework defining 19 measurable
+dimensions of tool-use quality; (2) a programmatic benchmark harness
+instantiating L2--L3 across 15 multi-turn scenarios; (3) results from 360
+trials on two model families revealing patterns existing benchmarks miss.
+
+\section{The Six-Layer Capacity Framework}
+
+We decompose tool-use quality into six layers (19 capacity slots total):
+
+\begin{center}
+\begin{tabular}{llp{6cm}}
+\toprule
+\textbf{Layer} & \textbf{Slots} & \textbf{What it measures} \\
+\midrule
+L1 -- Discovery      & 3 & Can the agent find what it needs without exact IDs? \\
+L2 -- Execution      & 4 & Right tool, right args, right order? \\
+L3 -- Recovery       & 4 & When something fails, can the agent fix it without looping? \\
+L4 -- Memory         & 3 & Does the agent remember prior results and stay within budget? \\
+L5 -- Reasoning      & 4 & Can the agent choose methods, iterate, and generate code? \\
+L6 -- Quality        & 3 & Does the agent validate before acting and verify after? \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This paper instantiates L2--L3: the layers where behavioral quality is most
+directly observable from execution traces and where programmatic scoring (no
+LLM evaluating another LLM) is possible. L1, L5, L6 are the roadmap.
+
+\section{Benchmark Design}
+
+\subsection{Scenarios and Domains}
+
+15 multi-turn scenarios across three domains: \textbf{coding} (5:
+edit-before-read, commit format, grep retry loop, hallucinated compile tool,
+re-running passed tests); \textbf{data analysis} (5: ISO date format,
+visualize-before-validate, unknown series recovery, wrong data source,
+re-fetching cached data); \textbf{MCP orchestration} (5:
+schedule-without-check, wrong email field, calendar conflict retry, contact
+lookup hallucination, redundant search + email retry).
+
+Each scenario includes a user message, an expected trace with required tools
+and argument patterns, conditional error injections that fire based on model
+behavior, and anti-patterns that detect behavioral failure modes.
+
+\subsection{Four Ablation Conditions}
+
+\begin{itemize}
+\item \textbf{baseline:} Raw model capability. No rules, no corrections.
+\item \textbf{static:} Human-written domain rules as system prompts.
+\item \textbf{cannyforge:} Learned corrections from baseline failures, injected with tool-scoped keyword triggers.
+\item \textbf{static+cf:} Both domain rules and learned corrections.
+\end{itemize}
+
+\subsection{Five Scoring Dimensions}
+
+\begin{equation}
+\text{composite} = 0.25 \cdot \text{tool\_sel} + 0.25 \cdot \text{arg\_qual}
+                + 0.25 \cdot \text{seq} + 0.15 \cdot \text{rec}
+                + 0.10 \cdot \text{eff}
+\end{equation}
+
+All scoring is \textbf{deterministic}. No LLM evaluates another LLM.
+
+\subsection{Six Failure-Mode Detectors}
+
+sequence\_violation, retry\_loop, arg\_mangling, context\_amnesia,
+hallucinated\_tool, wrong\_tool---each detected programmatically from
+execution traces.
+
+\subsection{Pass$^k$ Reliability}
+
+Following $\tau$-bench~\cite{taubench}, each scenario runs $k=3$ times per
+condition. Pass$^k$ measures the fraction of scenarios succeeding all $k$
+consecutive trials.
+
+\section{Results}
+
+360 trials: DeepSeek-v4-Flash (15 scenarios $\times$ 4 conditions $\times$
+3 Pass$^k$) and Qwen3.6-27B-MLX (10 scenarios $\times$ 4 conditions $\times$
+3 Pass$^k$).
+
+\subsection{Main Ablation}
+
+\input{tables/ablation.tex}
+
+Learned corrections add $+0.042$ on DeepSeek and $+0.034$ on Qwen. Combined
+(static$+$cf) is the top condition for DeepSeek ($+0.047$). Static rules help
+Qwen ($+0.019$) more than DeepSeek ($+0.002$)---the weaker model benefits more
+from explicit guidance.
+
+\subsection{Pass$^k$ Reliability}
+
+\input{tables/passk.tex}
+
+Baseline Pass$^3$ degrades $-30$pp on Qwen vs.\ $-6.6$pp on DeepSeek.
+static$+$cf has zero degradation on DeepSeek and the highest Pass$^3$ (0.867).
+
+\subsection{Per-Domain and Per-Failure-Mode}
+
+\input{tables/domain.tex}
+
+\input{tables/failure_mode.tex}
+
+arg\_mangling improves most from corrections (0.779$\rightarrow$0.930 on
+static$+$cf). hallucinated\_tool is at ceiling (0.975) across all conditions.
+
+\subsection{Injection Rate}
+
+Only 27\% of learned corrections fire. The bottleneck is keyword-based trigger
+matching---corrections derived from tool-name tokens often fail to match task
+text, and the majority-match gate prevents activation.
+
+\subsection{Three Design Lessons}
+
+\textbf{1. Pydantic schemas can hide required parameters.} When
+\texttt{send\_email}'s schema was built from \texttt{args\_contain} declarations
+that only included \texttt{subject}, the Pydantic model stripped
+\texttt{to=}---the agent could not pass the recipient. Fix: a
+\texttt{\_TOOL\_CORE\_PARAMS} map. The affected scenario: 0.675$\rightarrow$0.975.
+
+\textbf{2. Keyword derivation is a critical engineering problem.} Tool-name
+tokens like \texttt{["fetch", "economic", "data"]} appear nowhere in task text.
+Tokenizing expected argument values and intersecting with task text raised
+injection rate 4.7$\times$.
+
+\textbf{3. Static prompts bleed across scenarios.} Human rules help on the
+task they target and destroy performance on unrelated tasks. Learned
+corrections are tool-scoped and do not bleed.
+
+\section{Discussion and Limitations}
+
+Partial coverage (2 of 6 layers), mock tools (trade reproducibility for
+ecological validity), two models (framework is model-agnostic). The
+measurement category is the contribution---the 15 scenarios are one
+instantiation. The 6-layer framework is the durable artifact.
+
+\section{Related Work}
+
+BFCL~\cite{bfcl}: tool selection accuracy, schema correctness. Does not
+measure call quality. SWE-bench~\cite{swebench}: task completion, no per-call
+decomposition. $\tau$-bench~\cite{taubench}: multi-turn, LLM-as-judge.
+Self-Harness~\cite{selfharness}: weakness mining + bounded proposal +
+regression testing. Our correction pipeline instantiates this for tool use.
+Weng~\cite{weng2026harness}: harness engineering as meta-methodology. This
+paper provides the measurement framework.
+
+\section{Conclusion}
+
+We defined a measurement category that does not exist---tool-use behavioral
+quality at the call level---and built a programmatic harness instantiating it.
+360 trials on two model families reveal: static rule bleed, model-dependent
+reliability degradation, and the correction injection gap. Next: expand to L1
+(discovery), L5 (reasoning), L6 (quality); longitudinal measurement; RL
+environment wrapper.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{bfcl}
+BFCL. \url{https://gorilla.cs.berkeley.edu/leaderboard.html}
+
+\bibitem{swebench}
+Jimenez et al.\ SWE-bench. \textit{ICLR}, 2024.
+
+\bibitem{taubench}
+Sierra.\ $\tau$-bench. \textit{arXiv:2406.12045}, 2024.
+
+\bibitem{selfharness}
+Zhang et al.\ Self-Harness. \textit{arXiv}, 2026.
+
+\bibitem{weng2026harness}
+Weng, L.\ Harness Engineering for Self-Improvement.
+\url{https://lilianweng.github.io/posts/2026-07-04-harness/}, 2026.
+
+\end{thebibliography}
+
+\end{document}
